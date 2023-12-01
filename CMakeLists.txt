@@ -7,7 +7,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
     message("Debug mode")
-        set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS};-gencode;arch=compute_86,code=sm_86;-g;-G;-lineinfo;-Xcompiler;-ggdb;-DNDEBUG;-std=c++17 -O0)
+        set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS};-gencode;arch=compute_86,code=sm_86;-g;-G;-lineinfo;-Xcompiler;-ggdb;-std=c++17 -O0)
 else ()
     set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS};-gencode;arch=compute_86,code=sm_86;-O3;-Xcompiler;-DNDEBUG;-std=c++17 -O3)
 endif ()
