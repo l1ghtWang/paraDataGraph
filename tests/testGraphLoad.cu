@@ -12,7 +12,7 @@
 
 
 DEFINE_string(test, "abc", "just a test");
-DEFINE_string(graphInputfile, "/home/share/graph_data/raw/datasets/Google/web-Google.el", "input graph file");
+DECLARE_string(graphInputfile);
 // DEFINE_uint32(partition_size_MB, 32, "partition size in MB");
 DECLARE_uint32(partition_size_MB);
 // using namespace std;

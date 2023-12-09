@@ -4,6 +4,8 @@ project(paraDataGraph LANGUAGES CXX CUDA)
 find_package(CUDA 11 REQUIRED)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(CMAKE_CUDA_ARCHITECTURES 86)
+
 
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
     message("Debug mode")
