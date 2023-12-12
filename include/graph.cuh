@@ -36,7 +36,7 @@
 
 DEFINE_uint32(partition_size_MB, 32, "partition size in MB");
 DEFINE_string(graphInputfile, "/home/share/graph_data/raw/datasets/Google/web-Google.el", "input graph file");
-DEFINE_uint32(nStreams, 8, "number of cuda streams");
+DEFINE_uint32(nStreams, 32, "number of cuda streams");
 
 struct Edge
 {
@@ -91,28 +91,57 @@ private:
     bool m_isWeighted;
     uint32_t *m_host_arr_node_edgeStartIndex_CSR;
     uint32_t *m_host_arr_edgeList;
+    uint32_t *m_dev_zeroCopy_arr_edgeList;
     std::vector<uint32_t> m_vec_host_node_value_datum;
     std::vector<uint32_t> m_vec_partition_start_node;
     std::vector<uint32_t> m_vec_partition_start_edge;
-    std::vector<uint32_t> m_vec_partition_numActiveNodes;
+    std::vector<uint32_t *> m_vec_dev_edgeList_perPartition;
     uint32_t *m_dev_arr_node_edgeStartIndex_CSR;
     uint32_t *m_dev_node_value_datum;
     uint32_t *m_dev_node_buffer_datum;
 
     uint32_t m_num_partitions;
-    uint32_t *m_dev_worklist;
-    uint32_t *m_dev_worklist_counter;
+
     std::vector<uint32_t *> m_vec_dev_worklist_perPartition;
     std::vector<uint32_t *> m_vec_dev_worklist_counter_perPartition;
-    std::vector<uint32_t *> m_vec_dev_edgeList_perPartition;
+    std::vector<uint32_t> m_vec_partition_numActiveNodes;
+
+
 
 public:
-    Graph() : m_num_nodes(0), m_num_edges(0), m_isWeighted(false), 
-    m_host_arr_node_edgeStartIndex_CSR(nullptr), m_host_arr_edgeList(nullptr), 
-    m_num_partitions(0), m_dev_worklist(nullptr), m_dev_worklist_counter(nullptr),
-    m_dev_arr_node_edgeStartIndex_CSR(nullptr),
-    m_dev_node_buffer_datum(nullptr),m_dev_node_value_datum(nullptr){};
-    ~Graph(){};
+    Graph() : m_num_nodes(0), m_num_edges(0), m_isWeighted(false),
+              m_host_arr_node_edgeStartIndex_CSR(nullptr), m_host_arr_edgeList(nullptr), m_dev_zeroCopy_arr_edgeList(nullptr),
+               m_num_partitions(0),
+              m_dev_arr_node_edgeStartIndex_CSR(nullptr),
+              m_dev_node_buffer_datum(nullptr), m_dev_node_value_datum(nullptr){};
+    ~Graph(){
+        if(m_host_arr_node_edgeStartIndex_CSR != nullptr)
+            delete[] m_host_arr_node_edgeStartIndex_CSR;
+        if(m_host_arr_edgeList != nullptr)
+            CHECK_CUDA_ERROR(cudaFreeHost(m_host_arr_edgeList));
+        if(m_dev_arr_node_edgeStartIndex_CSR != nullptr)
+            CHECK_CUDA_ERROR(cudaFree(m_dev_arr_node_edgeStartIndex_CSR));
+        if(m_dev_node_value_datum != nullptr)
+            CHECK_CUDA_ERROR(cudaFree(m_dev_node_value_datum));
+        if(m_dev_node_buffer_datum != nullptr)
+            CHECK_CUDA_ERROR(cudaFree(m_dev_node_buffer_datum));
+
+        for(int i = 0; i < m_vec_dev_worklist_perPartition.size(); i++)
+        {
+            if(m_vec_dev_worklist_perPartition[i] != nullptr)
+                CHECK_CUDA_ERROR(cudaFree(m_vec_dev_worklist_perPartition[i]));
+        }
+        for(int i = 0; i < m_vec_dev_worklist_counter_perPartition.size(); i++)
+        {
+            if(m_vec_dev_worklist_counter_perPartition[i] != nullptr)
+                CHECK_CUDA_ERROR(cudaFree(m_vec_dev_worklist_counter_perPartition[i]));
+        }
+        for(int i = 0; i < m_vec_dev_edgeList_perPartition.size(); i++)
+        {
+            if(m_vec_dev_edgeList_perPartition[i] != nullptr)
+                CHECK_CUDA_ERROR(cudaFree(m_vec_dev_edgeList_perPartition[i]));
+        }
+    };
 
     std::vector<uint32_t> getherValues()
     {
@@ -162,6 +191,10 @@ public:
         return m_host_arr_edgeList;
     }
 
+    uint32_t* get_device_zeroCopy_edgeList_ptr()
+    {
+        return m_dev_zeroCopy_arr_edgeList;
+    }
     uint32_t get_partition_start_node(uint32_t partition_id)
     {
         return m_vec_partition_start_node[partition_id];
@@ -285,7 +318,8 @@ public:
             m_num_edges = edgeCounter;
             m_host_arr_node_edgeStartIndex_CSR = new uint32_t[m_num_nodes + 1];
             CHECK_CUDA_ERROR(cudaMallocHost(&m_host_arr_edgeList, (m_num_edges) * sizeof(uint32_t)));
-
+            CHECK_CUDA_ERROR(cudaHostGetDevicePointer(&m_dev_zeroCopy_arr_edgeList, m_host_arr_edgeList, 0));
+            
             uint32_t *degree = new uint32_t[m_num_nodes];
             uint32_t counter = 0;
             for (uint32_t i = 0; i < m_num_nodes; i++)

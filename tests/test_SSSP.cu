@@ -116,6 +116,33 @@ namespace SSSP
 
         }
     }
+    __global__ void kernel_SSSP_zeroCopy_sync_push_dd(uint32_t work_size,
+                                             uint32_t *dev_node_value_datum,
+                                             uint32_t *dev_node_buffer_datum,
+                                             uint32_t *dev_worklist,
+                                             uint32_t *dev_edgeList,
+                                             uint32_t *dev_arr_node_edgeStartIndex_CSR)
+    {
+        uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+        uint32_t nthreads = blockDim.x * gridDim.x;
+        for (uint32_t i = tid; i < work_size; i += nthreads)
+        {
+            uint32_t node = dev_worklist[i];
+            if (dev_node_value_datum[node] > dev_node_buffer_datum[node])
+            {
+                dev_node_value_datum[node] = dev_node_buffer_datum[node];
+                // uint32_t edge_loc =
+                uint32_t edge_start = dev_arr_node_edgeStartIndex_CSR[node];
+                uint32_t edge_end = dev_arr_node_edgeStartIndex_CSR[node + 1];
+                for (uint32_t edge = edge_start; edge < edge_end; edge++)
+                {
+                    uint32_t dst_node = dev_edgeList[edge];
+                    uint32_t new_dist = dev_node_buffer_datum[node] + 1;
+                    atomicMin(&dev_node_buffer_datum[dst_node], new_dist);
+                }
+            }
+        }
+    }
 
     std::vector<uint32_t> host_sssp(Graph &graph, uint32_t source_node)
     {
@@ -188,126 +215,244 @@ namespace SSSP
     }
 };
 
-bool initial_Framework(Graph &g, cudaStream_t* streams)
+enum class dataTransferType
 {
-    SSSP::kernel_InitGraph<<<g.get_num_nodes() / 512 + 1, 512>>>(g.get_num_nodes(),
-                                                                 g.get_device_value_ptr(),
-                                                                 g.get_device_buffer_ptr(),
-                                                                 FLAGS_source_node);
-    cudaDeviceSynchronize();
-    CHECK_LAST_CUDA_ERROR();
-    for (int i = 0; i < g.get_num_partitions(); i++)
-    {
-        uint32_t startNodeIdx = g.get_partition_start_node(i);
-        uint32_t numNodesInPartition = g.get_partition_start_node(i + 1) - g.get_partition_start_node(i);
-        SSSP::kernel_RebuildWorklist_perPartition<<<numNodesInPartition / 512 + 1, 512, 0, streams[i % FLAGS_nStreams]>>>(startNodeIdx,
-                                                                                                                          numNodesInPartition,
-                                                                                                                          g.get_device_value_ptr(),
-                                                                                                                          g.get_device_buffer_ptr(),
-                                                                                                                          g.get_vector_device_worklist_ptr()[i],
-                                                                                                                          g.get_vector_device_worklist_counter_ptr()[i]);
-    }
-    // for (int i = 0; i < FLAGS_nStreams; i++)
-    // {
-    //     cudaStreamSynchronize(streams[i]);
-    // }
+    Explicit_Filter,
+    Unified_Memory,
+    Zero_Copy,
+    Explicit_Compaction
+};
 
-    bool isConverged = true;
-    for (int i = 0; i < g.get_num_partitions(); i++)
-    {
-        uint32_t numItemInWorkList = g.get_worklist_counter_value(i, streams[i % FLAGS_nStreams]);
-        g.set_partition_numActiveNodes(i, numItemInWorkList);
-        isConverged &= (numItemInWorkList == 0);
-        // printf("partition: %d numItemInWorkList: %u\n", i, numItemInWorkList);
-    }
-    CHECK_LAST_CUDA_ERROR();
-    return isConverged;
-}
-
-void computeGraph(Graph &g, cudaStream_t* streams)
+class Engine_SSSP
 {
 
-}
-
-bool rebuild_workList_check_converge(Graph &g, cudaStream_t* streams)
-{
-    for (int i = 0; i < g.get_num_partitions(); i++)
+private:
+    cudaStream_t *m_streams;
+    Graph *m_graph;
+    std::vector<dataTransferType> m_vec_dataTransferType_perPartition;
+public:
+    Engine_SSSP() : m_graph(nullptr), m_streams(nullptr)
     {
-        uint32_t streamIdx = i % FLAGS_nStreams;
-        uint32_t startNodeIdx = g.get_partition_start_node(i);
-        uint32_t numNodesInPartition = g.get_partition_start_node(i + 1) - g.get_partition_start_node(i);
-        cudaMemsetAsync(g.get_vector_device_worklist_counter_ptr()[i], 0, sizeof(uint32_t), streams[streamIdx]);
-        SSSP::kernel_RebuildWorklist_perPartition<<<numNodesInPartition / 512 + 1, 512, 0, streams[streamIdx]>>>(startNodeIdx,
-                                                                                                                 numNodesInPartition,
-                                                                                                                 g.get_device_value_ptr(),
-                                                                                                                 g.get_device_buffer_ptr(),
-                                                                                                                 g.get_vector_device_worklist_ptr()[i],
-                                                                                                                 g.get_vector_device_worklist_counter_ptr()[i]);
+        init_cuda_streams();
     }
-    // for (int i = 0; i < FLAGS_nStreams; i++)
-    // {
-    //     cudaStreamSynchronize(streams[i]);
-    // }
-    // CHECK_LAST_CUDA_ERROR();
-    bool isConverged = true;
-    for (int i = 0; i < g.get_num_partitions(); i++)
+
+    ~Engine_SSSP()
     {
-        uint32_t streamIdx = i % FLAGS_nStreams;
-
-        uint32_t numItemInWorkList = g.get_worklist_counter_value(i, streams[streamIdx]);
-        g.set_partition_numActiveNodes(i, numItemInWorkList);
-        isConverged &= (numItemInWorkList == 0);
-    }
-    return isConverged;
-}
-
-void start(Graph g, cudaStream_t* streams)
-{
-    bool isConverged = false;
-    isConverged = initial_Framework(g, streams);
-
-    uint32_t iterationCount = 0;
-    while (!isConverged)
-    {
-        for (int i = 0; i < g.get_num_partitions(); i++)
+        if(m_streams != nullptr)
         {
-            uint32_t streamIdx = i % FLAGS_nStreams;
-            uint32_t startNodeIdx = g.get_partition_start_node(i);
-            uint32_t numNodesInPartition = g.get_partition_start_node(i + 1) - g.get_partition_start_node(i);
-            uint32_t numEdgesInPartition = g.get_partition_start_edge(i + 1) - g.get_partition_start_edge(i);
-            uint32_t *dev_edgeList_curPartiton = g.get_device_edgeList_ptr(streamIdx);
-            cudaMemcpyAsync(dev_edgeList_curPartiton,
-                            g.get_host_array_edgeList_ptr() + g.get_partition_start_edge(i),
-                            numEdgesInPartition * sizeof(uint32_t),
-                            cudaMemcpyHostToDevice,
-                            streams[streamIdx]);
-
-            SSSP::kernel_SSSP_sync_push_dd<<<numNodesInPartition / 512 + 1, 512, 0, streams[streamIdx]>>>(numNodesInPartition,
-                                                                                                          g.get_device_value_ptr(),
-                                                                                                          g.get_device_buffer_ptr(),
-                                                                                                          g.get_vector_device_worklist_ptr()[i],
-                                                                                                          dev_edgeList_curPartiton,
-                                                                                                          g.get_partition_start_edge(i),
-                                                                                                          g.get_device_node_edgeStartIndex_CSR_ptr());
+            for (int i = 0; i < FLAGS_nStreams; i++)
+            {
+                    cudaStreamDestroy(m_streams[i]);
+            }
+            delete[] m_streams;
         }
+    }
+    void setGraph(Graph* g)
+    {
+        m_graph = g;
+    }
 
-        // in theory, we don't need this sync, but the iteration number increase when we remove this sync
+    void init_cuda_streams()
+    {
+        m_streams = new cudaStream_t[FLAGS_nStreams];
         for (int i = 0; i < FLAGS_nStreams; i++)
         {
-            cudaStreamSynchronize(streams[i]);
-        }
-        CHECK_LAST_CUDA_ERROR();
-
-        isConverged = rebuild_workList_check_converge(g, streams);
-        iterationCount++;
-        if (iterationCount == 1000)
-        {
-            break;
+            CHECK_CUDA_ERROR(cudaStreamCreate(&m_streams[i]));
         }
     }
 
-    std::cout << "total iteration: " << iterationCount << std::endl;
-}
+    bool initial_Framework()
+    {
+        SSSP::kernel_InitGraph<<<m_graph->get_num_nodes() / 512 + 1, 512>>>(m_graph->get_num_nodes(),
+                                                                     m_graph->get_device_value_ptr(),
+                                                                     m_graph->get_device_buffer_ptr(),
+                                                                     FLAGS_source_node);
+        cudaDeviceSynchronize();
+        CHECK_LAST_CUDA_ERROR();
+        uint32_t streamIdx = 0;
+        for (int i = 0; i < m_graph->get_num_partitions(); i++)
+        {
+            streamIdx++;
+            if (streamIdx == FLAGS_nStreams)
+            {
+                streamIdx = 1;
+            }
+            uint32_t startNodeIdx = m_graph->get_partition_start_node(i);
+            uint32_t numNodesInPartition = m_graph->get_partition_start_node(i + 1) - m_graph->get_partition_start_node(i);
+            SSSP::kernel_RebuildWorklist_perPartition<<<numNodesInPartition / 512 + 1, 512, 0, m_streams[streamIdx]>>>(startNodeIdx,
+                                                                                                                       numNodesInPartition,
+                                                                                                                       m_graph->get_device_value_ptr(),
+                                                                                                                       m_graph->get_device_buffer_ptr(),
+                                                                                                                       m_graph->get_vector_device_worklist_ptr()[i],
+                                                                                                                       m_graph->get_vector_device_worklist_counter_ptr()[i]);
+        }
+
+        bool isConverged = true;
+        streamIdx = 0;
+        for (int i = 0; i < m_graph->get_num_partitions(); i++)
+        {
+            streamIdx++;
+            if (streamIdx == FLAGS_nStreams)
+            {
+                streamIdx = 1;
+            }
+            uint32_t numItemInWorkList = m_graph->get_worklist_counter_value(i, m_streams[streamIdx]);
+            m_graph->set_partition_numActiveNodes(i, numItemInWorkList);
+            isConverged &= (numItemInWorkList == 0);
+            // printf("partition: %d numItemInWorkList: %u\n", i, numItemInWorkList);
+        }
+        CHECK_LAST_CUDA_ERROR();
+        // m_vec_dataTransferType_perPartition = std::vector<dataTransferType>(m_graph->get_num_partitions(), dataTransferType::Explicit_Filter);
+        m_vec_dataTransferType_perPartition = std::vector<dataTransferType>(m_graph->get_num_partitions(), dataTransferType::Zero_Copy);
+        printf("all ZC\n");
+
+        return isConverged;
+    }
+
+    bool rebuild_workList_check_converge()
+    {
+        uint32_t streamIdx = 0;
+        for (int i = 0; i < m_graph->get_num_partitions(); i++)
+        {
+            streamIdx++;
+            if (streamIdx == FLAGS_nStreams)
+            {
+                streamIdx = 1;
+            }
+            uint32_t startNodeIdx = m_graph->get_partition_start_node(i);
+            uint32_t numNodesInPartition = m_graph->get_partition_start_node(i + 1) - m_graph->get_partition_start_node(i);
+            cudaMemsetAsync(m_graph->get_vector_device_worklist_counter_ptr()[i], 0, sizeof(uint32_t), m_streams[streamIdx]);
+            SSSP::kernel_RebuildWorklist_perPartition<<<numNodesInPartition / 512 + 1, 512, 0, m_streams[streamIdx]>>>(startNodeIdx,
+                                                                                                                     numNodesInPartition,
+                                                                                                                     m_graph->get_device_value_ptr(),
+                                                                                                                     m_graph->get_device_buffer_ptr(),
+                                                                                                                     m_graph->get_vector_device_worklist_ptr()[i],
+                                                                                                                     m_graph->get_vector_device_worklist_counter_ptr()[i]);
+        }
+
+        bool isConverged = true;
+        streamIdx = 0;
+        for (int i = 0; i < m_graph->get_num_partitions(); i++)
+        {
+            streamIdx++;
+            if (streamIdx == FLAGS_nStreams)
+            {
+                streamIdx = 1;
+            }
+
+            uint32_t numItemInWorkList = m_graph->get_worklist_counter_value(i, m_streams[streamIdx]);
+            m_graph->set_partition_numActiveNodes(i, numItemInWorkList);
+            isConverged &= (numItemInWorkList == 0);
+        }
+        return isConverged;
+    }
+
+    void EF_process_partition(uint32_t partitionIdx, uint32_t streamIdx)
+    {
+        uint32_t startNodeIdx = m_graph->get_partition_start_node(partitionIdx);
+        uint32_t numNodesInPartition = m_graph->get_partition_start_node(partitionIdx + 1) - m_graph->get_partition_start_node(partitionIdx);
+        uint32_t numEdgesInPartition = m_graph->get_partition_start_edge(partitionIdx + 1) - m_graph->get_partition_start_edge(partitionIdx);
+        uint32_t *dev_edgeList_curPartiton = m_graph->get_device_edgeList_ptr(streamIdx);
+        cudaMemcpyAsync(dev_edgeList_curPartiton,
+                        m_graph->get_host_array_edgeList_ptr() + m_graph->get_partition_start_edge(partitionIdx),
+                        numEdgesInPartition * sizeof(uint32_t),
+                        cudaMemcpyHostToDevice,
+                        m_streams[streamIdx]);
+
+        SSSP::kernel_SSSP_sync_push_dd<<<numNodesInPartition / 512 + 1, 512, 0, m_streams[streamIdx]>>>(numNodesInPartition,
+                                                                                                        m_graph->get_device_value_ptr(),
+                                                                                                        m_graph->get_device_buffer_ptr(),
+                                                                                                        m_graph->get_vector_device_worklist_ptr()[partitionIdx],
+                                                                                                        dev_edgeList_curPartiton,
+                                                                                                        m_graph->get_partition_start_edge(partitionIdx),
+                                                                                                        m_graph->get_device_node_edgeStartIndex_CSR_ptr());
+    }
+    void ZC_process_partition(uint32_t partitionIdx, uint32_t streamIdx)
+    {
+        uint32_t startNodeIdx = m_graph->get_partition_start_node(partitionIdx);
+        uint32_t numNodesInPartition = m_graph->get_partition_start_node(partitionIdx + 1) - m_graph->get_partition_start_node(partitionIdx);
+        uint32_t numEdgesInPartition = m_graph->get_partition_start_edge(partitionIdx + 1) - m_graph->get_partition_start_edge(partitionIdx);
+        uint32_t *dev_edgeList_zeroCopy = m_graph->get_device_zeroCopy_edgeList_ptr();
+
+        SSSP::kernel_SSSP_zeroCopy_sync_push_dd<<<numNodesInPartition / 512 + 1, 512, 0, m_streams[streamIdx]>>>(numNodesInPartition,
+                                                                                                        m_graph->get_device_value_ptr(),
+                                                                                                        m_graph->get_device_buffer_ptr(),
+                                                                                                        m_graph->get_vector_device_worklist_ptr()[partitionIdx],
+                                                                                                        dev_edgeList_zeroCopy,
+                                                                                                        m_graph->get_device_node_edgeStartIndex_CSR_ptr());
+    }
+
+    void start()
+    {
+        bool isConverged = false;
+        isConverged = initial_Framework();
+
+        uint32_t iterationCount = 0;
+        while (!isConverged)
+        {
+            uint32_t streamIdx = 0;
+            for (int i = 0; i < m_graph->get_num_partitions(); i++)
+            {
+                if (m_graph->get_partition_numActiveNodes(i) == 0)
+                {
+                    continue;
+                }
+                streamIdx++;
+                if (streamIdx == FLAGS_nStreams)
+                {
+                    streamIdx = 1;
+                }
+                if(m_vec_dataTransferType_perPartition[i] == dataTransferType::Explicit_Filter)
+                {
+                    // printf("iteration: %d partition: %d Explicit_Filter", iterationCount, i);
+                    EF_process_partition(i, streamIdx);
+                }
+                else if(m_vec_dataTransferType_perPartition[i] == dataTransferType::Zero_Copy)
+                {
+                    ZC_process_partition(i, streamIdx);
+                }
+                else
+                {
+                    printf("Error: data transfer type not supported\n");
+                }
+                // uint32_t startNodeIdx = m_graph->get_partition_start_node(i);
+                // uint32_t numNodesInPartition = m_graph->get_partition_start_node(i + 1) - m_graph->get_partition_start_node(i);
+                // uint32_t numEdgesInPartition = m_graph->get_partition_start_edge(i + 1) - m_graph->get_partition_start_edge(i);
+                // uint32_t *dev_edgeList_curPartiton = m_graph->get_device_edgeList_ptr(streamIdx);
+                // cudaMemcpyAsync(dev_edgeList_curPartiton,
+                //                 m_graph->get_host_array_edgeList_ptr() + m_graph->get_partition_start_edge(i),
+                //                 numEdgesInPartition * sizeof(uint32_t),
+                //                 cudaMemcpyHostToDevice,
+                //                 m_streams[streamIdx]);
+
+                // SSSP::kernel_SSSP_sync_push_dd<<<numNodesInPartition / 512 + 1, 512, 0, m_streams[streamIdx]>>>(numNodesInPartition,
+                //                                                                                               m_graph->get_device_value_ptr(),
+                //                                                                                               m_graph->get_device_buffer_ptr(),
+                //                                                                                               m_graph->get_vector_device_worklist_ptr()[i],
+                //                                                                                               dev_edgeList_curPartiton,
+                //                                                                                               m_graph->get_partition_start_edge(i),
+                //                                                                                               m_graph->get_device_node_edgeStartIndex_CSR_ptr());
+            }
+
+            for (int i = 0; i < FLAGS_nStreams; i++)
+            {
+                cudaStreamSynchronize(m_streams[i]);
+            }
+            CHECK_LAST_CUDA_ERROR();
+
+            isConverged = rebuild_workList_check_converge();
+            iterationCount++;
+            if (iterationCount == 1000)
+            {
+                break;
+            }
+        }
+
+        std::cout << "total iteration: " << iterationCount << std::endl;
+    }
+};
+
+
 
 int main(int argc, char **argv)
 {
@@ -318,16 +463,13 @@ int main(int argc, char **argv)
     g.loadGraph(FLAGS_graphInputfile);
     printf("source node: %u\n", FLAGS_source_node);
 
-    cudaStream_t streams[FLAGS_nStreams];
-    for (int i = 0; i < FLAGS_nStreams; i++)
-    {
-        CHECK_CUDA_ERROR(cudaStreamCreate(&streams[i]));
-    }
+    Engine_SSSP engine;
+    engine.setGraph(&g);
 
     for (int i = 0; i < FLAGS_num_run; i++)
     {
         Stopwatch sw_run_time(true);
-        start(g, streams);
+        engine.start();
         sw_run_time.stop();
         printf("run %d time: %f ms\n", i, sw_run_time.ms());
     }
