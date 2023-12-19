@@ -319,10 +319,10 @@ public:
         CHECK_LAST_CUDA_ERROR();
         // m_vec_dataTransferType_perPartition = std::vector<dataTransferType>(m_graph->get_num_partitions(), dataTransferType::Explicit_Filter);
         // printf("all EF\n");
-        // m_vec_dataTransferType_perPartition = std::vector<dataTransferType>(m_graph->get_num_partitions(), dataTransferType::Zero_Copy);
-        // printf("all ZC\n");
-        m_vec_dataTransferType_perPartition = std::vector<dataTransferType>(m_graph->get_num_partitions(), dataTransferType::Unified_Memory);
-        printf("all UM\n");
+        m_vec_dataTransferType_perPartition = std::vector<dataTransferType>(m_graph->get_num_partitions(), dataTransferType::Zero_Copy);
+        printf("all ZC\n");
+        // m_vec_dataTransferType_perPartition = std::vector<dataTransferType>(m_graph->get_num_partitions(), dataTransferType::Unified_Memory);
+        // printf("all UM\n");
 
         return isConverged;
     }
@@ -350,6 +350,7 @@ public:
 
         bool isConverged = true;
         streamIdx = 0;
+        printf("numActiveNodesPerPartition: ");
         for (int i = 0; i < m_graph->get_num_partitions(); i++)
         {
             streamIdx++;
@@ -360,8 +361,10 @@ public:
 
             uint32_t numItemInWorkList = m_graph->get_worklist_counter_value(i, m_streams[streamIdx]);
             m_graph->set_partition_numActiveNodes(i, numItemInWorkList);
+            printf(" %u", numItemInWorkList);
             isConverged &= (numItemInWorkList == 0);
         }
+        printf("\n");
         return isConverged;
     }
 

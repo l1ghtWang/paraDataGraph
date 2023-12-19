@@ -9,3 +9,18 @@ target_link_libraries(testGraphLoad ${EXTRA_LIBS})
 
 cuda_add_executable(test_SSSP test_SSSP.cu)
 target_link_libraries(test_SSSP ${EXTRA_LIBS})
+
+cuda_add_executable(test_SSSP_EFonly test_SSSP_EFonly.cu)
+target_link_libraries(test_SSSP_EFonly ${EXTRA_LIBS})
+
+cuda_add_executable(test_SSSP_UMonly test_SSSP_UMonly.cu)
+target_link_libraries(test_SSSP_UMonly ${EXTRA_LIBS})
+
+cuda_add_executable(test_SSSP_ZConly test_SSSP_ZConly.cu)
+target_link_libraries(test_SSSP_ZConly ${EXTRA_LIBS})
+
+cuda_add_executable(test_SSSP_ZConly_partitionInfo test_SSSP_ZConly_partitionInfo.cu)
+target_link_libraries(test_SSSP_ZConly_partitionInfo ${EXTRA_LIBS})
+
+cuda_add_executable(test_rankNodeByDegree test_rankNodeByDegree.cu)
+target_link_libraries(test_rankNodeByDegree ${EXTRA_LIBS})

@@ -317,12 +317,12 @@ public:
             // printf("partition: %d numItemInWorkList: %u\n", i, numItemInWorkList);
         }
         CHECK_LAST_CUDA_ERROR();
-        // m_vec_dataTransferType_perPartition = std::vector<dataTransferType>(m_graph->get_num_partitions(), dataTransferType::Explicit_Filter);
-        // printf("all EF\n");
+        m_vec_dataTransferType_perPartition = std::vector<dataTransferType>(m_graph->get_num_partitions(), dataTransferType::Explicit_Filter);
+        printf("all EF\n");
         // m_vec_dataTransferType_perPartition = std::vector<dataTransferType>(m_graph->get_num_partitions(), dataTransferType::Zero_Copy);
         // printf("all ZC\n");
-        m_vec_dataTransferType_perPartition = std::vector<dataTransferType>(m_graph->get_num_partitions(), dataTransferType::Unified_Memory);
-        printf("all UM\n");
+        // m_vec_dataTransferType_perPartition = std::vector<dataTransferType>(m_graph->get_num_partitions(), dataTransferType::Unified_Memory);
+        // printf("all UM\n");
 
         return isConverged;
     }

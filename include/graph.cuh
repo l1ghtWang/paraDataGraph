@@ -92,6 +92,7 @@ private:
     uint32_t *m_host_arr_node_edgeStartIndex_CSR;
     uint32_t *m_host_arr_edgeList;
     uint32_t *m_dev_zeroCopy_arr_edgeList;
+    uint32_t *m_unifiedMem_arr_edgeList;
     std::vector<uint32_t> m_vec_host_node_value_datum;
     std::vector<uint32_t> m_vec_partition_start_node;
     std::vector<uint32_t> m_vec_partition_start_edge;
@@ -107,10 +108,9 @@ private:
     std::vector<uint32_t> m_vec_partition_numActiveNodes;
 
 
-
 public:
     Graph() : m_num_nodes(0), m_num_edges(0), m_isWeighted(false),
-              m_host_arr_node_edgeStartIndex_CSR(nullptr), m_host_arr_edgeList(nullptr), m_dev_zeroCopy_arr_edgeList(nullptr),
+              m_host_arr_node_edgeStartIndex_CSR(nullptr), m_host_arr_edgeList(nullptr), m_dev_zeroCopy_arr_edgeList(nullptr),m_unifiedMem_arr_edgeList(nullptr),
                m_num_partitions(0),
               m_dev_arr_node_edgeStartIndex_CSR(nullptr),
               m_dev_node_buffer_datum(nullptr), m_dev_node_value_datum(nullptr){};
@@ -141,6 +141,8 @@ public:
             if(m_vec_dev_edgeList_perPartition[i] != nullptr)
                 CHECK_CUDA_ERROR(cudaFree(m_vec_dev_edgeList_perPartition[i]));
         }
+        if(m_unifiedMem_arr_edgeList != nullptr)
+            CHECK_CUDA_ERROR(cudaFree(m_unifiedMem_arr_edgeList));
     };
 
     std::vector<uint32_t> getherValues()
@@ -191,6 +193,10 @@ public:
         return m_host_arr_edgeList;
     }
 
+    uint32_t* get_unifiedMem_array_edgeList_ptr()
+    {
+        return m_unifiedMem_arr_edgeList;
+    }
     uint32_t* get_device_zeroCopy_edgeList_ptr()
     {
         return m_dev_zeroCopy_arr_edgeList;
@@ -319,7 +325,8 @@ public:
             m_host_arr_node_edgeStartIndex_CSR = new uint32_t[m_num_nodes + 1];
             CHECK_CUDA_ERROR(cudaMallocHost(&m_host_arr_edgeList, (m_num_edges) * sizeof(uint32_t)));
             CHECK_CUDA_ERROR(cudaHostGetDevicePointer(&m_dev_zeroCopy_arr_edgeList, m_host_arr_edgeList, 0));
-            
+            CHECK_CUDA_ERROR(cudaMallocManaged(&m_unifiedMem_arr_edgeList, (m_num_edges) * sizeof(uint32_t)));
+
             uint32_t *degree = new uint32_t[m_num_nodes];
             uint32_t counter = 0;
             for (uint32_t i = 0; i < m_num_nodes; i++)
@@ -329,6 +336,7 @@ public:
                 for(int j = 0; j < edges_map[i].size(); j++)
                 {
                     m_host_arr_edgeList[counter + j] = edges_map[i][j];
+                    m_unifiedMem_arr_edgeList[counter + j] = edges_map[i][j];
                     if(i == 0)
                     {
                         printf("node %d , edge %d , to: %d\n", i, j, edges_map[i][j]);
@@ -435,7 +443,99 @@ public:
         sw.stop();
         std::cout << "Loading graph Time: " << sw.ms() << " ms" << std::endl;
     };
+
+
+    void rankNodeByDegree(std::string filename)
+    {
+
+        Stopwatch sw(true);
+        std::cout << "Loading graph from " << filename << std::endl;
+        std::string fileExtension = get_File_Extension(filename);
+        if (fileExtension == "el")
+            m_isWeighted = false;
+        else if (fileExtension == "wel")
+            m_isWeighted = true;
+        else
+        {
+            std::cout << "File extension not supported!" << std::endl;
+            exit(1);
+        }
+
+        std::ifstream infile;
+        infile.open(filename);
+        std::stringstream ss;
+        std::string line;
+        uint32_t edgeCounter = 0;
+        if (m_isWeighted)
+        {
+        }
+        else
+        {
+            // std::vector<Edge> edges;
+            std::map<uint32_t, std::vector<uint32_t>> edges_map;
+            Edge newEdge;
+            uint32_t max = 0;
+            while (getline(infile, line))
+            {
+                ss.str("");
+                ss.clear();
+                ss << line;
+
+                ss >> newEdge.source;
+                ss >> newEdge.end;
+
+                // edges.push_back(newEdge);
+                // std::cout<<"newEdge.source: "<<newEdge.source<<" newEdge.end: "<<newEdge.end<<std::endl;
+                edges_map[newEdge.source].push_back(newEdge.end);
+                edgeCounter++;
+
+                if (max < newEdge.source)
+                    max = newEdge.source;
+                if (max < newEdge.end)
+                    max = newEdge.end;
+            }
+            infile.close();
+            m_num_nodes = max + 1;
+            m_num_edges = edgeCounter;
+            std::vector<std::pair<uint32_t, uint32_t>> vec_node_degree;
+            for(int i = 0; i < m_num_nodes; i++)
+            {
+                vec_node_degree.push_back(std::make_pair(i, edges_map[i].size()));
+            }
+            std::sort(vec_node_degree.begin(), vec_node_degree.end(), 
+                [&](std::pair<uint32_t, uint32_t>& a, 
+                    std::pair<uint32_t, uint32_t>& b) 
+                { 
+                    return a.second > b.second; 
+                } 
+            );
+            
+
+            std::cout<<"output node rank by degree"<<std::endl;
+            uint32_t numNode_10segment = m_num_nodes / 10;
+            for(int i = 0; i < 10; i++)
+            {
+                std::cout<<"\nsegment "<<i<<std::endl<<std::endl;
+                int numRandNode = 10;
+                if(i == 0)
+                    numRandNode = 100;
+                //randomly select a few nodes from each segment
+                for(int j = 0; j < numRandNode; j++)
+                {
+                    int random_index = rand() % numNode_10segment + i * numNode_10segment;
+                    std::cout<<vec_node_degree[random_index].first<<" "<<vec_node_degree[random_index].second<<std::endl;
+                }
+            }
+
+            
+        }
+        sw.stop();
+        std::cout << "Loading graph Time: " << sw.ms() << " ms" << std::endl;
+    };
+
 };
+
+
 
 // template <typename T>
 // class NodeOutputDatum
