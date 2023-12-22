@@ -82,7 +82,7 @@ struct Edge
 //     }
 // };
             
-
+template <typename TValue>
 class Graph
 {
 private:
@@ -93,13 +93,13 @@ private:
     uint32_t *m_host_arr_edgeList;
     uint32_t *m_dev_zeroCopy_arr_edgeList;
     uint32_t *m_unifiedMem_arr_edgeList;
-    std::vector<uint32_t> m_vec_host_node_value_datum;
+    std::vector<TValue> m_vec_host_node_value_datum;
     std::vector<uint32_t> m_vec_partition_start_node;
     std::vector<uint32_t> m_vec_partition_start_edge;
     std::vector<uint32_t *> m_vec_dev_edgeList_perPartition;
     uint32_t *m_dev_arr_node_edgeStartIndex_CSR;
-    uint32_t *m_dev_node_value_datum;
-    uint32_t *m_dev_node_buffer_datum;
+    TValue *m_dev_node_value_datum;
+    TValue *m_dev_node_buffer_datum;
 
     uint32_t m_num_partitions;
 
@@ -145,11 +145,11 @@ public:
             CHECK_CUDA_ERROR(cudaFree(m_unifiedMem_arr_edgeList));
     };
 
-    std::vector<uint32_t> getherValues()
+    std::vector<TValue> getherValues()
     {
 
-        uint32_t* host_node_value_datum = new uint32_t[m_num_nodes];
-        CHECK_CUDA_ERROR(cudaMemcpy(host_node_value_datum, m_dev_node_value_datum, m_num_nodes * sizeof(uint32_t), cudaMemcpyDeviceToHost));
+        TValue* host_node_value_datum = new TValue[m_num_nodes];
+        CHECK_CUDA_ERROR(cudaMemcpy(host_node_value_datum, m_dev_node_value_datum, m_num_nodes * sizeof(TValue), cudaMemcpyDeviceToHost));
         m_vec_host_node_value_datum.resize(m_num_nodes);
         for(int i = 0; i < m_num_nodes; i++)
         {
@@ -212,11 +212,11 @@ public:
         return m_vec_partition_start_edge[partition_id];
     }
 
-    uint32_t * get_device_value_ptr()
+    TValue * get_device_value_ptr()
     {
         return m_dev_node_value_datum;
     }
-    uint32_t *get_device_buffer_ptr()
+    TValue *get_device_buffer_ptr()
     {
         return m_dev_node_buffer_datum;
     }
@@ -407,8 +407,8 @@ public:
             print_partitioned_graph_info();
             printf("maximum_edgeListPerPartition: %d\n", maximum_edgeListPerPartition);
 
-            CHECK_CUDA_ERROR(cudaMalloc(&m_dev_node_value_datum, m_num_nodes * sizeof(uint32_t)));
-            CHECK_CUDA_ERROR(cudaMalloc(&m_dev_node_buffer_datum, m_num_nodes * sizeof(uint32_t)));
+            CHECK_CUDA_ERROR(cudaMalloc(&m_dev_node_value_datum, m_num_nodes * sizeof(TValue)));
+            CHECK_CUDA_ERROR(cudaMalloc(&m_dev_node_buffer_datum, m_num_nodes * sizeof(TValue)));
             // CHECK_CUDA_ERROR(cudaMalloc(&m_dev_worklist, m_num_nodes * sizeof(uint32_t)));
             // CHECK_CUDA_ERROR(cudaMalloc(&m_dev_worklist_counter, sizeof(uint32_t)));
             // CHECK_CUDA_ERROR(cudaMemset(m_dev_worklist_counter, 0, sizeof(uint32_t)));

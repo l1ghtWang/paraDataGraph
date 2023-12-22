@@ -24,7 +24,7 @@ int main(int argc, char **argv)
 {
     gflags::ParseCommandLineFlags(&argc, &argv, true);
     
-    Graph g;
+    Graph<uint32_t> g;
     g.rankNodeByDegree(FLAGS_graphInputfile);
     printf("source node: %u\n", FLAGS_source_node);
 

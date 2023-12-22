@@ -9,7 +9,11 @@
 #include "cudaErrorCheck.cuh"
 #include <queue>
 
-#define SSSP_TVALUE uint32_t
+#define TVALUE float
+#define ERROR_THRESHOLD 0.2
+#define PR_ERROR 0.01f
+#define PR_ALPHA 0.85f
+
 DECLARE_string(graphInputfile);
 // DEFINE_uint32(partition_size_MB, 32, "partition size in MB");
 DECLARE_uint32(partition_size_MB);
@@ -17,18 +21,22 @@ DEFINE_uint32(source_node, 0, "source node");
 DECLARE_uint32(nStreams);
 DEFINE_bool(check, false, "check result");
 DEFINE_uint32(num_run, 10, "number of run");
+DEFINE_double(pr_error, 0.01, "error threshold of PageRank");
+DEFINE_double(pr_alpha, 0.85, "alpha of PageRank");
+DEFINE_bool(pr_norm, false, "Normalize PR output ranks (L1)");
 
-namespace SSSP
+
+namespace PageRank
 {
-    __forceinline__ __device__ bool kernel_isActiveNode(uint32_t node, uint32_t buffer, uint32_t value)
+    __forceinline__ __device__ bool kernel_isActiveNode(uint32_t node, TVALUE buffer, TVALUE value)
     {
-        return buffer < value;
+        return buffer > PR_ERROR;
     }
 
     __global__ 
     void kernel_InitGraph(uint32_t work_size,
-                          uint32_t *dev_node_value_datum,
-                          uint32_t *dev_node_buffer_datum,
+                          TVALUE *dev_node_value_datum,
+                          TVALUE *dev_node_buffer_datum,
                           uint32_t source_node)
     {
         uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -36,22 +44,15 @@ namespace SSSP
         for (uint32_t i = tid; i < work_size; i += nthreads)
         {
             uint32_t node = i;
-            if (node == source_node)
-            {
-                dev_node_buffer_datum[node] = 0;
-            }
-            else
-            {
-                dev_node_buffer_datum[node] = UINT32_MAX;
-            }
-            dev_node_value_datum[node] = UINT32_MAX;
+            dev_node_buffer_datum[node] = 1-PR_ALPHA;
+            dev_node_value_datum[node] = 0.0f;
         }
     }
 
     __global__ 
     void kernel_RebuildWorklist(uint32_t work_size,
-                                uint32_t *dev_node_value_datum,
-                                uint32_t *dev_node_buffer_datum,
+                                TVALUE *dev_node_value_datum,
+                                TVALUE *dev_node_buffer_datum,
                                 uint32_t *dev_worklist,
                                 uint32_t *dev_worklist_counter)
     {
@@ -60,7 +61,7 @@ namespace SSSP
         for (uint32_t i = tid; i < work_size; i += nthreads)
         {
             uint32_t node = i;
-            if(SSSP::kernel_isActiveNode(node, dev_node_buffer_datum[node], dev_node_value_datum[node]))
+            if(PageRank::kernel_isActiveNode(node, dev_node_buffer_datum[node], dev_node_value_datum[node]))
             {
                 uint32_t location = atomicAdd(dev_worklist_counter, 1);
                 dev_worklist[location] = node;
@@ -71,8 +72,8 @@ namespace SSSP
     __global__ 
     void kernel_RebuildWorklist_perPartition(uint32_t startNodeIdx,
                                             uint32_t work_size,
-                                            uint32_t *dev_node_value_datum,
-                                            uint32_t *dev_node_buffer_datum,
+                                            TVALUE *dev_node_value_datum,
+                                            TVALUE *dev_node_buffer_datum,
                                             uint32_t *dev_worklist, 
                                             uint32_t *dev_worklist_counter)
     {
@@ -81,16 +82,16 @@ namespace SSSP
         for (uint32_t i = tid; i < work_size; i += nthreads)
         {
             uint32_t node = i + startNodeIdx;
-            if (SSSP::kernel_isActiveNode(node, dev_node_buffer_datum[node], dev_node_value_datum[node]))
+            if (PageRank::kernel_isActiveNode(node, dev_node_buffer_datum[node], dev_node_value_datum[node]))
             {
                 uint32_t location = atomicAdd(dev_worklist_counter, 1);
                 dev_worklist[location] = node;
             }
         }
     }
-    __global__ void kernel_SSSP_sync_push_dd(uint32_t work_size,
-                                             uint32_t *dev_node_value_datum,
-                                             uint32_t *dev_node_buffer_datum,
+    __global__ void kernel_PageRank_sync_push_dd(uint32_t work_size,
+                                             TVALUE *dev_node_value_datum,
+                                             TVALUE *dev_node_buffer_datum,
                                              uint32_t *dev_worklist,
                                              uint32_t *dev_edgeList,
                                              uint32_t partition_start_edge_offset,
@@ -101,25 +102,25 @@ namespace SSSP
         for (uint32_t i = tid; i < work_size; i += nthreads)
         {
             uint32_t node = dev_worklist[i];
-            if(dev_node_value_datum[node] > dev_node_buffer_datum[node])
+            TVALUE curDelta = atomicExch(&dev_node_buffer_datum[node], 0.0f);
+            if(curDelta > PR_ERROR)
             {
-                dev_node_value_datum[node] = dev_node_buffer_datum[node];
-                // uint32_t edge_loc =
                 uint32_t edge_start = dev_arr_node_edgeStartIndex_CSR[node] - partition_start_edge_offset;
                 uint32_t edge_end = dev_arr_node_edgeStartIndex_CSR[node + 1] - partition_start_edge_offset;
+                TVALUE push_delta = curDelta * PR_ALPHA / (edge_end - edge_start);
                 for (uint32_t edge = edge_start; edge < edge_end; edge++)
                 {
                     uint32_t dst_node = dev_edgeList[edge];
-                    uint32_t new_dist = dev_node_buffer_datum[node] + 1;
-                    atomicMin(&dev_node_buffer_datum[dst_node], new_dist);
+                    atomicAdd(&dev_node_buffer_datum[dst_node], push_delta);
                 }
             }
 
+
         }
     }
-    __global__ void kernel_SSSP_zeroCopy_sync_push_dd(uint32_t work_size,
-                                             uint32_t *dev_node_value_datum,
-                                             uint32_t *dev_node_buffer_datum,
+    __global__ void kernel_PageRank_zeroCopy_sync_push_dd(uint32_t work_size,
+                                             TVALUE *dev_node_value_datum,
+                                             TVALUE *dev_node_buffer_datum,
                                              uint32_t *dev_worklist,
                                              uint32_t *dev_edgeList,
                                              uint32_t *dev_arr_node_edgeStartIndex_CSR)
@@ -129,90 +130,130 @@ namespace SSSP
         for (uint32_t i = tid; i < work_size; i += nthreads)
         {
             uint32_t node = dev_worklist[i];
-            if (dev_node_value_datum[node] > dev_node_buffer_datum[node])
+            TVALUE curDelta = atomicExch(&dev_node_buffer_datum[node], 0.0f);
+            if(curDelta > PR_ERROR)
             {
-                dev_node_value_datum[node] = dev_node_buffer_datum[node];
-                // uint32_t edge_loc =
-                uint32_t edge_start = dev_arr_node_edgeStartIndex_CSR[node];
-                uint32_t edge_end = dev_arr_node_edgeStartIndex_CSR[node + 1];
+                uint32_t edge_start = dev_arr_node_edgeStartIndex_CSR[node] ;
+                uint32_t edge_end = dev_arr_node_edgeStartIndex_CSR[node + 1] ;
+                TVALUE push_delta = curDelta * PR_ALPHA / (edge_end - edge_start);
                 for (uint32_t edge = edge_start; edge < edge_end; edge++)
                 {
                     uint32_t dst_node = dev_edgeList[edge];
-                    uint32_t new_dist = dev_node_buffer_datum[node] + 1;
-                    atomicMin(&dev_node_buffer_datum[dst_node], new_dist);
+                    atomicAdd(&dev_node_buffer_datum[dst_node], push_delta);
                 }
             }
         }
     }
 
-    std::vector<uint32_t> host_sssp(Graph<SSSP_TVALUE> &graph, uint32_t source_node)
+    std::vector<TVALUE> host_pr(Graph<TVALUE> &graph)
     {
-        std::vector<uint32_t> distances(graph.get_num_nodes(), UINT32_MAX);
-        std::queue<uint32_t> work;
+        std::vector<TVALUE> residual(graph.get_num_nodes(), 0.0);
+        std::vector<TVALUE> ranks(graph.get_num_nodes(), 1-PR_ALPHA);
 
-        distances[source_node] = 0;
-        work.push(source_node);
-        while (!work.empty())
+        for (uint32_t node = 0; node < graph.get_num_nodes(); ++node)
         {
-            uint32_t node = work.front();
-            work.pop();
             uint32_t edge_start = graph.get_host_array_node_edgeStartIndex_CSR(node);
             uint32_t edge_end = graph.get_host_array_node_edgeStartIndex_CSR(node + 1);
-            for (uint32_t edge = edge_start; edge < edge_end; edge++)
+            uint32_t out_degree = edge_end - edge_start;
+
+            if (out_degree == 0)
+                continue;
+
+            TVALUE update = ((1.0 - PR_ALPHA) * PR_ALPHA) / out_degree;
+
+            for (uint32_t edge = edge_start; edge < edge_end; ++edge)
             {
-                uint32_t dst_node = graph.get_host_array_edgeList_ptr()[edge];
-                uint32_t new_dist = distances[node] + 1;
-                if (new_dist < distances[dst_node])
+                uint32_t dest = graph.get_host_array_edgeList_ptr()[edge];
+                residual[dest] += update;
+            }
+        }
+        std::queue<uint32_t> wl1, wl2;
+        std::queue<uint32_t> *in_wl = &wl1, *out_wl = &wl2;
+        for (uint32_t node = 0; node < graph.get_num_nodes(); ++node)
+        {
+            in_wl->push(node);
+        }
+        int iteration = 0;
+        while (!in_wl->empty())
+        {
+            while (!in_wl->empty())
+            {
+                uint32_t node = in_wl->front();
+                in_wl->pop();
+
+                TVALUE res = residual[node];
+                ranks[node] += res;
+                residual[node] = 0;
+
+                uint32_t edge_start = graph.get_host_array_node_edgeStartIndex_CSR(node);
+                uint32_t edge_end = graph.get_host_array_node_edgeStartIndex_CSR(node + 1);
+                uint32_t out_degree = edge_end - edge_start;
+
+                if (out_degree == 0)
+                    continue;
+
+                TVALUE update = res * PR_ALPHA / out_degree;
+
+                for (uint32_t edge = edge_start; edge < edge_end; ++edge)
                 {
-                    distances[dst_node] = new_dist;
-                    work.push(dst_node);
+                    uint32_t dest = graph.get_host_array_edgeList_ptr()[edge];
+                    TVALUE prev = residual[dest];
+                    residual[dest] += update;
+
+                    if (prev + update > PR_ERROR && prev < PR_ERROR)
+                    {
+                        out_wl->push(dest);
+                    }
                 }
             }
+
+            ++iteration;
+            std::swap(in_wl, out_wl);
         }
-        return distances;
+
+        return ranks;
+
     }
 
-    int SSSPCheckErrors(const std::vector<uint32_t> &distances, const std::vector<uint32_t> &regression)
+    int PageRank_CheckErrors(const std::vector<TVALUE> &ranks, const std::vector<TVALUE> &regression)
     {
-        if (distances.size() != regression.size())
+        if (ranks.size() != regression.size())
         {
-            return std::abs((long long)distances.size() - (long long)regression.size());
+            return std::abs((int64_t)ranks.size() - (int64_t)regression.size());
         }
 
-        int over_errors = 0, miss_errors = 0;
-        std::vector<int> over_error_indices, miss_error_indices;
+        // if (FLAGS_pr_norm) // L1 normalization
+        // {
+        //     TVALUE ranks_sum = 0.0, regression_sum = 0.0;
+        //     for (auto val : ranks) ranks_sum += val;
+        //     for (auto val : regression) regression_sum += val;
+        //     for (auto &val : ranks) val /= ranks_sum;
+        //     for (auto &val : regression) val /= regression_sum;
+        // }
 
-        uint32_t
-            max_over_delta = 0,
-            max_miss_delta = 0;
+        int num_diffs = 0;
 
-        for (int i = 0; i < regression.size(); ++i)
+        for (int node = 0; node < ranks.size(); node++)
         {
-            uint32_t hv = distances[i];
-            uint32_t rv = regression[i];
 
-            if (hv > rv)
+            bool is_right = true;
+            if (fabs(ranks[node]) < 0.01f && fabs(regression[node] - 1) < 0.01f)
+                continue;
+            if (fabs(ranks[node] - 0.0) < 0.01f)
             {
-                ++over_errors;
-                over_error_indices.push_back(i);
-                max_over_delta = std::max(max_over_delta, hv - rv);
+                if (fabs(ranks[node] - regression[node]) > ERROR_THRESHOLD)
+                    is_right = false;
             }
-            else if (hv < rv)
+            else
             {
-                ++miss_errors;
-                miss_error_indices.push_back(i);
-                max_miss_delta = std::max(max_miss_delta, rv - hv);
+                if (fabs((ranks[node] - regression[node]) / regression[node]) > ERROR_THRESHOLD)
+                    is_right = false;
             }
+
+            if (!is_right)
+                num_diffs++;
         }
-
-        if (miss_errors > 0)
-            printf("Miss errors: %d\n\n", miss_errors);
-
-        if (over_errors > 0)
-            printf("Over errors: %d\n\n", over_errors);
-
-        return (miss_errors + over_errors);
-
+        return num_diffs;
     }
 };
 
@@ -239,20 +280,20 @@ enum class dataTransferType
 
 // }
 
-class Engine_SSSP
+class Engine_PageRank
 {
 
 private:
     cudaStream_t *m_streams;
-    Graph<SSSP_TVALUE> *m_graph;
+    Graph<TVALUE> *m_graph;
     std::vector<dataTransferType> m_vec_dataTransferType_perPartition;
 public:
-    Engine_SSSP() : m_graph(nullptr), m_streams(nullptr)
+    Engine_PageRank() : m_graph(nullptr), m_streams(nullptr)
     {
         init_cuda_streams();
     }
 
-    ~Engine_SSSP()
+    ~Engine_PageRank()
     {
         if(m_streams != nullptr)
         {
@@ -263,7 +304,7 @@ public:
             delete[] m_streams;
         }
     }
-    void setGraph(Graph<SSSP_TVALUE>* g)
+    void setGraph(Graph<TVALUE>* g)
     {
         m_graph = g;
     }
@@ -279,10 +320,10 @@ public:
 
     bool initial_Framework()
     {
-        SSSP::kernel_InitGraph<<<m_graph->get_num_nodes() / 512 + 1, 512>>>(m_graph->get_num_nodes(),
-                                                                     m_graph->get_device_value_ptr(),
-                                                                     m_graph->get_device_buffer_ptr(),
-                                                                     FLAGS_source_node);
+        PageRank::kernel_InitGraph<<<m_graph->get_num_nodes() / 512 + 1, 512>>>(m_graph->get_num_nodes(),
+                                                                                m_graph->get_device_value_ptr(),
+                                                                                m_graph->get_device_buffer_ptr(),
+                                                                                FLAGS_source_node);
         cudaDeviceSynchronize();
         CHECK_LAST_CUDA_ERROR();
         uint32_t streamIdx = 0;
@@ -295,12 +336,12 @@ public:
             }
             uint32_t startNodeIdx = m_graph->get_partition_start_node(i);
             uint32_t numNodesInPartition = m_graph->get_partition_start_node(i + 1) - m_graph->get_partition_start_node(i);
-            SSSP::kernel_RebuildWorklist_perPartition<<<numNodesInPartition / 512 + 1, 512, 0, m_streams[streamIdx]>>>(startNodeIdx,
-                                                                                                                       numNodesInPartition,
-                                                                                                                       m_graph->get_device_value_ptr(),
-                                                                                                                       m_graph->get_device_buffer_ptr(),
-                                                                                                                       m_graph->get_vector_device_worklist_ptr()[i],
-                                                                                                                       m_graph->get_vector_device_worklist_counter_ptr()[i]);
+            PageRank::kernel_RebuildWorklist_perPartition<<<numNodesInPartition / 512 + 1, 512, 0, m_streams[streamIdx]>>>(startNodeIdx,
+                                                                                                                            numNodesInPartition,
+                                                                                                                            m_graph->get_device_value_ptr(),
+                                                                                                                            m_graph->get_device_buffer_ptr(),
+                                                                                                                            m_graph->get_vector_device_worklist_ptr()[i],
+                                                                                                                            m_graph->get_vector_device_worklist_counter_ptr()[i]);
         }
 
         bool isConverged = true;
@@ -341,7 +382,7 @@ public:
             uint32_t startNodeIdx = m_graph->get_partition_start_node(i);
             uint32_t numNodesInPartition = m_graph->get_partition_start_node(i + 1) - m_graph->get_partition_start_node(i);
             cudaMemsetAsync(m_graph->get_vector_device_worklist_counter_ptr()[i], 0, sizeof(uint32_t), m_streams[streamIdx]);
-            SSSP::kernel_RebuildWorklist_perPartition<<<numNodesInPartition / 512 + 1, 512, 0, m_streams[streamIdx]>>>(startNodeIdx,
+            PageRank::kernel_RebuildWorklist_perPartition<<<numNodesInPartition / 512 + 1, 512, 0, m_streams[streamIdx]>>>(startNodeIdx,
                                                                                                                      numNodesInPartition,
                                                                                                                      m_graph->get_device_value_ptr(),
                                                                                                                      m_graph->get_device_buffer_ptr(),
@@ -378,7 +419,7 @@ public:
                         cudaMemcpyHostToDevice,
                         m_streams[streamIdx]);
 
-        SSSP::kernel_SSSP_sync_push_dd<<<numNodesInPartition / 512 + 1, 512, 0, m_streams[streamIdx]>>>(numNodesInPartition,
+        PageRank::kernel_PageRank_sync_push_dd<<<numNodesInPartition / 512 + 1, 512, 0, m_streams[streamIdx]>>>(numNodesInPartition,
                                                                                                         m_graph->get_device_value_ptr(),
                                                                                                         m_graph->get_device_buffer_ptr(),
                                                                                                         m_graph->get_vector_device_worklist_ptr()[partitionIdx],
@@ -393,7 +434,7 @@ public:
         uint32_t numEdgesInPartition = m_graph->get_partition_start_edge(partitionIdx + 1) - m_graph->get_partition_start_edge(partitionIdx);
         uint32_t *dev_edgeList_zeroCopy = m_graph->get_device_zeroCopy_edgeList_ptr();
 
-        SSSP::kernel_SSSP_zeroCopy_sync_push_dd<<<numNodesInPartition / 512 + 1, 512, 0, m_streams[streamIdx]>>>(numNodesInPartition,
+        PageRank::kernel_PageRank_zeroCopy_sync_push_dd<<<numNodesInPartition / 512 + 1, 512, 0, m_streams[streamIdx]>>>(numNodesInPartition,
                                                                                                         m_graph->get_device_value_ptr(),
                                                                                                         m_graph->get_device_buffer_ptr(),
                                                                                                         m_graph->get_vector_device_worklist_ptr()[partitionIdx],
@@ -407,7 +448,7 @@ public:
         uint32_t numNodesInPartition = m_graph->get_partition_start_node(partitionIdx + 1) - m_graph->get_partition_start_node(partitionIdx);
         uint32_t numEdgesInPartition = m_graph->get_partition_start_edge(partitionIdx + 1) - m_graph->get_partition_start_edge(partitionIdx);
         uint32_t *dev_edgeList_curPartiton = m_graph->get_unifiedMem_array_edgeList_ptr()+ m_graph->get_partition_start_edge(partitionIdx);
-        SSSP::kernel_SSSP_sync_push_dd<<<numNodesInPartition / 512 + 1, 512, 0, m_streams[streamIdx]>>>(numNodesInPartition,
+        PageRank::kernel_PageRank_sync_push_dd<<<numNodesInPartition / 512 + 1, 512, 0, m_streams[streamIdx]>>>(numNodesInPartition,
                                                                                                         m_graph->get_device_value_ptr(),
                                                                                                         m_graph->get_device_buffer_ptr(),
                                                                                                         m_graph->get_vector_device_worklist_ptr()[partitionIdx],
@@ -417,7 +458,7 @@ public:
 
 
         // uint32_t *dev_edgeList_zeroCopy = m_graph->get_unifiedMem_array_edgeList_ptr();
-        // SSSP::kernel_SSSP_zeroCopy_sync_push_dd<<<numNodesInPartition / 512 + 1, 512, 0, m_streams[streamIdx]>>>(numNodesInPartition,
+        // PageRank::kernel_SSSP_zeroCopy_sync_push_dd<<<numNodesInPartition / 512 + 1, 512, 0, m_streams[streamIdx]>>>(numNodesInPartition,
         //                                                                                                 m_graph->get_device_value_ptr(),
         //                                                                                                 m_graph->get_device_buffer_ptr(),
         //                                                                                                 m_graph->get_vector_device_worklist_ptr()[partitionIdx],
@@ -501,11 +542,11 @@ int main(int argc, char **argv)
     gflags::ParseCommandLineFlags(&argc, &argv, true);
     
     Stopwatch sw_overall_time(true);
-    Graph<SSSP_TVALUE> g;
+    Graph<TVALUE> g;
     g.loadGraph(FLAGS_graphInputfile);
-    printf("source node: %u\n", FLAGS_source_node);
+    // printf("source node: %u\n", FLAGS_source_node);
 
-    Engine_SSSP engine;
+    Engine_PageRank engine;
     engine.setGraph(&g);
 
     for (int i = 0; i < FLAGS_num_run; i++)
@@ -518,10 +559,13 @@ int main(int argc, char **argv)
 
 
     if(FLAGS_check)
-    {
-        auto regression = SSSP::host_sssp(g, FLAGS_source_node);
-        int errors = SSSP::SSSPCheckErrors(g.getherValues(), regression);
+    {   
+        Stopwatch sw_check_time(true);
+        auto regression = PageRank::host_pr(g);
+        int errors = PageRank::PageRank_CheckErrors(g.getherValues(), regression);
         printf("total errors: %d\n", errors);
+        sw_check_time.stop();
+        std::cout << "Check_Time: " << sw_check_time.ms() << " ms" << std::endl;
     }
     else
     {

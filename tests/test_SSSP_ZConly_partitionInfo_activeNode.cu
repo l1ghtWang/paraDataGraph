@@ -9,6 +9,8 @@
 #include "cudaErrorCheck.cuh"
 #include <queue>
 
+#define SSSP_TVALUE uint32_t
+
 DECLARE_string(graphInputfile);
 // DEFINE_uint32(partition_size_MB, 32, "partition size in MB");
 DECLARE_uint32(partition_size_MB);
@@ -144,7 +146,7 @@ namespace SSSP
         }
     }
 
-    std::vector<uint32_t> host_sssp(Graph &graph, uint32_t source_node)
+    std::vector<uint32_t> host_sssp(Graph<SSSP_TVALUE> &graph, uint32_t source_node)
     {
         std::vector<uint32_t> distances(graph.get_num_nodes(), UINT32_MAX);
         std::queue<uint32_t> work;
@@ -243,7 +245,7 @@ class Engine_SSSP
 
 private:
     cudaStream_t *m_streams;
-    Graph *m_graph;
+    Graph<SSSP_TVALUE> *m_graph;
     std::vector<dataTransferType> m_vec_dataTransferType_perPartition;
 public:
     Engine_SSSP() : m_graph(nullptr), m_streams(nullptr)
@@ -262,7 +264,7 @@ public:
             delete[] m_streams;
         }
     }
-    void setGraph(Graph* g)
+    void setGraph(Graph<SSSP_TVALUE>* g)
     {
         m_graph = g;
     }
@@ -503,7 +505,7 @@ int main(int argc, char **argv)
     gflags::ParseCommandLineFlags(&argc, &argv, true);
     
     Stopwatch sw_overall_time(true);
-    Graph g;
+    Graph<SSSP_TVALUE> g;
     g.loadGraph(FLAGS_graphInputfile);
     printf("source node: %u\n", FLAGS_source_node);
 

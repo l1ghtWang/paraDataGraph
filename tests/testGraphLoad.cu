@@ -25,7 +25,7 @@ int main(int argc, char** argv) {
     
     Stopwatch sw(true);
     std::cout << "Testing Graph Load" << std::endl;
-    Graph g;
+    Graph<uint32_t> g;
 
     std::string graphInputfile = "/home/share/graph_data/raw/datasets/Google/web-Google.el";
     g.loadGraph(graphInputfile);
