@@ -9,6 +9,7 @@
 #include "cudaErrorCheck.cuh"
 #include <queue>
 
+#define SSSP_TVALUE uint32_t
 DECLARE_string(graphInputfile);
 // DEFINE_uint32(partition_size_MB, 32, "partition size in MB");
 DECLARE_uint32(partition_size_MB);
@@ -144,7 +145,7 @@ namespace SSSP
         }
     }
 
-    std::vector<uint32_t> host_sssp(Graph<uint32_t> &graph, uint32_t source_node)
+    std::vector<uint32_t> host_sssp(Graph<SSSP_TVALUE> &graph, uint32_t source_node)
     {
         std::vector<uint32_t> distances(graph.get_num_nodes(), UINT32_MAX);
         std::queue<uint32_t> work;
@@ -155,8 +156,8 @@ namespace SSSP
         {
             uint32_t node = work.front();
             work.pop();
-            uint32_t edge_start = graph.get_host_array_node_edgeStartIndex_CSR(node);
-            uint32_t edge_end = graph.get_host_array_node_edgeStartIndex_CSR(node + 1);
+            uint32_t edge_start = graph.get_edgeStartIndex(node);
+            uint32_t edge_end = graph.get_edgeStartIndex(node + 1);
             for (uint32_t edge = edge_start; edge < edge_end; edge++)
             {
                 uint32_t dst_node = graph.get_host_array_edgeList_ptr()[edge];
@@ -243,7 +244,7 @@ class Engine_SSSP
 
 private:
     cudaStream_t *m_streams;
-    Graph<uint32_t> *m_graph;
+    Graph<SSSP_TVALUE> *m_graph;
     std::vector<dataTransferType> m_vec_dataTransferType_perPartition;
 public:
     Engine_SSSP() : m_graph(nullptr), m_streams(nullptr)
@@ -262,7 +263,7 @@ public:
             delete[] m_streams;
         }
     }
-    void setGraph(Graph<uint32_t>* g)
+    void setGraph(Graph<SSSP_TVALUE>* g)
     {
         m_graph = g;
     }
@@ -481,7 +482,7 @@ public:
 
             isConverged = rebuild_workList_check_converge();
             sw_iteration_time.stop();
-            printf("iteration: %d time: %f ms, numPartitionProcessed: %u numActiveNodes: %u\n", iterationCount, sw_iteration_time.ms(), numPartitionToProcess, numActiveNodes);
+            printf("iteration: %d iteration_time: %f ms, numPartitionProcessed: %u Cur_numActiveNodes: %u\n", iterationCount, sw_iteration_time.ms(), numPartitionToProcess, numActiveNodes);
             iterationCount++;
             if (iterationCount == 1000)
             {
@@ -500,7 +501,7 @@ int main(int argc, char **argv)
     gflags::ParseCommandLineFlags(&argc, &argv, true);
     
     Stopwatch sw_overall_time(true);
-    Graph<uint32_t> g;
+    Graph<SSSP_TVALUE> g;
     g.loadGraph(FLAGS_graphInputfile);
     printf("source node: %u\n", FLAGS_source_node);
 
@@ -512,7 +513,8 @@ int main(int argc, char **argv)
         Stopwatch sw_run_time(true);
         engine.start();
         sw_run_time.stop();
-        printf("run %d time: %f ms\n", i, sw_run_time.ms());
+        printf("run_id %d Exec_time: %f ms\n", i, sw_run_time.ms());
+        g.reset_UM_edgeList();
     }
 
 

@@ -152,8 +152,8 @@ namespace PageRank
 
         for (uint32_t node = 0; node < graph.get_num_nodes(); ++node)
         {
-            uint32_t edge_start = graph.get_host_array_node_edgeStartIndex_CSR(node);
-            uint32_t edge_end = graph.get_host_array_node_edgeStartIndex_CSR(node + 1);
+            uint32_t edge_start = graph.get_edgeStartIndex(node);
+            uint32_t edge_end = graph.get_edgeStartIndex(node + 1);
             uint32_t out_degree = edge_end - edge_start;
 
             if (out_degree == 0)
@@ -185,8 +185,8 @@ namespace PageRank
                 ranks[node] += res;
                 residual[node] = 0;
 
-                uint32_t edge_start = graph.get_host_array_node_edgeStartIndex_CSR(node);
-                uint32_t edge_end = graph.get_host_array_node_edgeStartIndex_CSR(node + 1);
+                uint32_t edge_start = graph.get_edgeStartIndex(node);
+                uint32_t edge_end = graph.get_edgeStartIndex(node + 1);
                 uint32_t out_degree = edge_end - edge_start;
 
                 if (out_degree == 0)
@@ -217,6 +217,19 @@ namespace PageRank
 
     int PageRank_CheckErrors(const std::vector<TVALUE> &ranks, const std::vector<TVALUE> &regression)
     {
+        std::cout<<"GPU result: "<<std::endl;
+        for(int i = 0; i < 30; i++)
+        {
+            std::cout<<i<<":"<<ranks[i]<<" ";
+        }
+        std::cout<<std::endl;
+        std::cout<<"CPU result: "<<std::endl;
+        for(int i = 0; i < 30; i++)
+        {
+            std::cout<<i<<":"<<regression[i]<<" ";
+        }
+        std::cout<<std::endl;
+        
         if (ranks.size() != regression.size())
         {
             return std::abs((int64_t)ranks.size() - (int64_t)regression.size());
@@ -359,12 +372,12 @@ public:
             // printf("partition: %d numItemInWorkList: %u\n", i, numItemInWorkList);
         }
         CHECK_LAST_CUDA_ERROR();
-        // m_vec_dataTransferType_perPartition = std::vector<dataTransferType>(m_graph->get_num_partitions(), dataTransferType::Explicit_Filter);
-        // printf("all EF\n");
+        m_vec_dataTransferType_perPartition = std::vector<dataTransferType>(m_graph->get_num_partitions(), dataTransferType::Explicit_Filter);
+        printf("all EF\n");
         // m_vec_dataTransferType_perPartition = std::vector<dataTransferType>(m_graph->get_num_partitions(), dataTransferType::Zero_Copy);
         // printf("all ZC\n");
-        m_vec_dataTransferType_perPartition = std::vector<dataTransferType>(m_graph->get_num_partitions(), dataTransferType::Unified_Memory);
-        printf("all UM\n");
+        // m_vec_dataTransferType_perPartition = std::vector<dataTransferType>(m_graph->get_num_partitions(), dataTransferType::Unified_Memory);
+        // printf("all UM\n");
 
         return isConverged;
     }

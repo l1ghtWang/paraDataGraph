@@ -482,7 +482,7 @@ public:
 
             isConverged = rebuild_workList_check_converge();
             sw_iteration_time.stop();
-            printf("iteration: %d iteration_time: %f ms, numPartitionProcessed: %u Cur_numActiveNodes: %u\n", iterationCount, sw_iteration_time.ms(), numPartitionToProcess, numActiveNodes);
+            printf("iteration: %d time: %f ms, numPartitionProcessed: %u numActiveNodes: %u\n", iterationCount, sw_iteration_time.ms(), numPartitionToProcess, numActiveNodes);
             iterationCount++;
             if (iterationCount == 1000)
             {
@@ -501,7 +501,7 @@ int main(int argc, char **argv)
     gflags::ParseCommandLineFlags(&argc, &argv, true);
     
     Stopwatch sw_overall_time(true);
-    Graph<SSSP_TVALUE> g;
+    Graph<uint32_t> g;
     g.loadGraph(FLAGS_graphInputfile);
     printf("source node: %u\n", FLAGS_source_node);
 
@@ -513,8 +513,7 @@ int main(int argc, char **argv)
         Stopwatch sw_run_time(true);
         engine.start();
         sw_run_time.stop();
-        printf("run_id %d Exec_time: %f ms\n", i, sw_run_time.ms());
-        g.reset_UM_edgeList();
+        printf("run %d time: %f ms\n", i, sw_run_time.ms());
     }
 
 

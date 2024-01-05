@@ -10,7 +10,6 @@
 #include <queue>
 
 #define SSSP_TVALUE uint32_t
-
 DECLARE_string(graphInputfile);
 // DEFINE_uint32(partition_size_MB, 32, "partition size in MB");
 DECLARE_uint32(partition_size_MB);
@@ -89,6 +88,32 @@ namespace SSSP
             }
         }
     }
+
+    __global__ 
+    void kernel_RebuildWorklist_reportActiveEdge_perPartition(uint32_t startNodeIdx,
+                                                                uint32_t work_size,
+                                                                uint32_t *dev_node_value_datum,
+                                                                uint32_t *dev_node_buffer_datum,
+                                                                uint32_t *dev_worklist, 
+                                                                uint32_t *dev_worklist_counter,
+                                                                uint32_t *dev_arr_node_edgeStartIndex_CSR,
+                                                                uint32_t *dev_activeEdge_counter)
+    {
+        uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+        uint32_t nthreads = blockDim.x * gridDim.x;
+        for (uint32_t i = tid; i < work_size; i += nthreads)
+        {
+            uint32_t node = i + startNodeIdx;
+            if (SSSP::kernel_isActiveNode(node, dev_node_buffer_datum[node], dev_node_value_datum[node]))
+            {
+                uint32_t degree = dev_arr_node_edgeStartIndex_CSR[node + 1] - dev_arr_node_edgeStartIndex_CSR[node];
+                atomicAdd(dev_activeEdge_counter, degree);
+                uint32_t location = atomicAdd(dev_worklist_counter, 1);
+                dev_worklist[location] = node;
+            }
+        }
+    }
+
     __global__ void kernel_SSSP_sync_push_dd(uint32_t work_size,
                                              uint32_t *dev_node_value_datum,
                                              uint32_t *dev_node_buffer_datum,
@@ -157,8 +182,8 @@ namespace SSSP
         {
             uint32_t node = work.front();
             work.pop();
-            uint32_t edge_start = graph.get_host_array_node_edgeStartIndex_CSR(node);
-            uint32_t edge_end = graph.get_host_array_node_edgeStartIndex_CSR(node + 1);
+            uint32_t edge_start = graph.get_edgeStartIndex(node);
+            uint32_t edge_end = graph.get_edgeStartIndex(node + 1);
             for (uint32_t edge = edge_start; edge < edge_end; edge++)
             {
                 uint32_t dst_node = graph.get_host_array_edgeList_ptr()[edge];
@@ -322,12 +347,70 @@ public:
         // m_vec_dataTransferType_perPartition = std::vector<dataTransferType>(m_graph->get_num_partitions(), dataTransferType::Explicit_Filter);
         // printf("all EF\n");
         m_vec_dataTransferType_perPartition = std::vector<dataTransferType>(m_graph->get_num_partitions(), dataTransferType::Zero_Copy);
+        // printf("all ZC\n");
+        // m_vec_dataTransferType_perPartition = std::vector<dataTransferType>(m_graph->get_num_partitions(), dataTransferType::Unified_Memory);
+        // printf("all UM\n");
+
+        return isConverged;
+    }
+
+    bool initial_Framework_reportActiveEdge()
+    {
+        SSSP::kernel_InitGraph<<<m_graph->get_num_nodes() / 512 + 1, 512>>>(m_graph->get_num_nodes(),
+                                                                     m_graph->get_device_value_ptr(),
+                                                                     m_graph->get_device_buffer_ptr(),
+                                                                     FLAGS_source_node);
+        cudaDeviceSynchronize();
+        CHECK_LAST_CUDA_ERROR();
+        uint32_t streamIdx = 0;
+        for (int i = 0; i < m_graph->get_num_partitions(); i++)
+        {
+            streamIdx++;
+            if (streamIdx == FLAGS_nStreams)
+            {
+                streamIdx = 1;
+            }
+            uint32_t startNodeIdx = m_graph->get_partition_start_node(i);
+            uint32_t numNodesInPartition = m_graph->get_partition_start_node(i + 1) - m_graph->get_partition_start_node(i);
+            SSSP::kernel_RebuildWorklist_reportActiveEdge_perPartition<<<numNodesInPartition / 512 + 1, 512, 0, m_streams[streamIdx]>>>(startNodeIdx,
+                                                                                                                       numNodesInPartition,
+                                                                                                                       m_graph->get_device_value_ptr(),
+                                                                                                                       m_graph->get_device_buffer_ptr(),
+                                                                                                                       m_graph->get_vector_device_worklist_ptr()[i],
+                                                                                                                       m_graph->get_vector_device_worklist_counter_ptr()[i],
+                                                                                                                       m_graph->get_device_node_edgeStartIndex_CSR_ptr(),
+                                                                                                                       m_graph->get_vector_device_numActiveEdge_counter_ptr()[i]);
+        }
+
+        bool isConverged = true;
+        streamIdx = 0;
+        printf("Next_numActiveEdgePerPartition: ");
+        for (int i = 0; i < m_graph->get_num_partitions(); i++)
+        {
+            streamIdx++;
+            if (streamIdx == FLAGS_nStreams)
+            {
+                streamIdx = 1;
+            }
+            uint32_t numItemInWorkList = m_graph->get_worklist_counter_value(i, m_streams[streamIdx]);
+            uint32_t numActiveEdge = m_graph->get_numActiveEdge_counter_value(i, m_streams[streamIdx]);
+            printf(" %u", numActiveEdge);
+            m_graph->set_partition_numActiveNodes(i, numItemInWorkList);
+            isConverged &= (numItemInWorkList == 0);
+            // printf("partition: %d numItemInWorkList: %u\n", i, numItemInWorkList);
+        }
+        printf("\n");
+        CHECK_LAST_CUDA_ERROR();
+        // m_vec_dataTransferType_perPartition = std::vector<dataTransferType>(m_graph->get_num_partitions(), dataTransferType::Explicit_Filter);
+        // printf("all EF\n");
+        m_vec_dataTransferType_perPartition = std::vector<dataTransferType>(m_graph->get_num_partitions(), dataTransferType::Zero_Copy);
         printf("all ZC\n");
         // m_vec_dataTransferType_perPartition = std::vector<dataTransferType>(m_graph->get_num_partitions(), dataTransferType::Unified_Memory);
         // printf("all UM\n");
 
         return isConverged;
     }
+
 
     bool rebuild_workList_check_converge()
     {
@@ -352,7 +435,9 @@ public:
 
         bool isConverged = true;
         streamIdx = 0;
-        printf("numActiveNodesPerPartition: ");
+        uint32_t num_EF_nextIteration = 0;
+        uint32_t num_ZC_nextIteration = 0;
+        printf("Next_numActiveNodesPerPartition: ");
         for (int i = 0; i < m_graph->get_num_partitions(); i++)
         {
             streamIdx++;
@@ -362,11 +447,84 @@ public:
             }
 
             uint32_t numItemInWorkList = m_graph->get_worklist_counter_value(i, m_streams[streamIdx]);
+            //determine data transfer type for next iteration
+            uint32_t numNode_inPartition = m_graph->get_partition_start_node(i + 1) - m_graph->get_partition_start_node(i);
+            if((float)numItemInWorkList < (0.4*numNode_inPartition))
+            {
+                m_vec_dataTransferType_perPartition[i] = dataTransferType::Zero_Copy;
+                num_ZC_nextIteration++;
+            }
+            else
+            {
+                m_vec_dataTransferType_perPartition[i] = dataTransferType::Explicit_Filter;
+                num_EF_nextIteration++;
+            }
             m_graph->set_partition_numActiveNodes(i, numItemInWorkList);
             printf(" %u", numItemInWorkList);
             isConverged &= (numItemInWorkList == 0);
         }
         printf("\n");
+        printf("num_EF_nextIteration: %u num_ZC_nextIteration: %u\n", num_EF_nextIteration, num_ZC_nextIteration);
+        return isConverged;
+    }
+
+    bool rebuild_workList_check_converge_reportActiveEdgeCount()
+    {
+        uint32_t streamIdx = 0;
+        for (int i = 0; i < m_graph->get_num_partitions(); i++)
+        {
+            streamIdx++;
+            if (streamIdx == FLAGS_nStreams)
+            {
+                streamIdx = 1;
+            }
+            uint32_t startNodeIdx = m_graph->get_partition_start_node(i);
+            uint32_t numNodesInPartition = m_graph->get_partition_start_node(i + 1) - m_graph->get_partition_start_node(i);
+            cudaMemsetAsync(m_graph->get_vector_device_worklist_counter_ptr()[i], 0, sizeof(uint32_t), m_streams[streamIdx]);
+            cudaMemsetAsync(m_graph->get_vector_device_numActiveEdge_counter_ptr()[i], 0, sizeof(uint32_t), m_streams[streamIdx]);
+            SSSP::kernel_RebuildWorklist_reportActiveEdge_perPartition<<<numNodesInPartition / 512 + 1, 512, 0, m_streams[streamIdx]>>>(startNodeIdx,
+                                                                                                                     numNodesInPartition,
+                                                                                                                     m_graph->get_device_value_ptr(),
+                                                                                                                     m_graph->get_device_buffer_ptr(),
+                                                                                                                     m_graph->get_vector_device_worklist_ptr()[i],
+                                                                                                                     m_graph->get_vector_device_worklist_counter_ptr()[i],
+                                                                                                                     m_graph->get_device_node_edgeStartIndex_CSR_ptr(),
+                                                                                                                     m_graph->get_vector_device_numActiveEdge_counter_ptr()[i]);
+        }
+
+        bool isConverged = true;
+        streamIdx = 0;
+        uint32_t num_EF_nextIteration = 0;
+        uint32_t num_ZC_nextIteration = 0;
+        printf("Next_numActiveEdgePerPartition: ");
+        for (int i = 0; i < m_graph->get_num_partitions(); i++)
+        {
+            streamIdx++;
+            if (streamIdx == FLAGS_nStreams)
+            {
+                streamIdx = 1;
+            }
+
+            uint32_t numItemInWorkList = m_graph->get_worklist_counter_value(i, m_streams[streamIdx]);
+            uint32_t numActiveEdge = m_graph->get_numActiveEdge_counter_value(i, m_streams[streamIdx]);
+            //determine data transfer type for next iteration
+            // uint32_t numNode_inPartition = m_graph->get_partition_start_node(i + 1) - m_graph->get_partition_start_node(i);
+            // if((float)numItemInWorkList < (0.4*numNode_inPartition))
+            // {
+            //     m_vec_dataTransferType_perPartition[i] = dataTransferType::Zero_Copy;
+            //     num_ZC_nextIteration++;
+            // }
+            // else
+            // {
+            //     m_vec_dataTransferType_perPartition[i] = dataTransferType::Explicit_Filter;
+            //     num_EF_nextIteration++;
+            // }
+            m_graph->set_partition_numActiveNodes(i, numItemInWorkList);
+            printf(" %u", numActiveEdge);
+            isConverged &= (numItemInWorkList == 0);
+        }
+        printf("\n");
+        // printf("num_EF_nextIteration: %u num_ZC_nextIteration: %u\n", num_EF_nextIteration, num_ZC_nextIteration);
         return isConverged;
     }
 
@@ -434,7 +592,7 @@ public:
     void start()
     {
         bool isConverged = false;
-        isConverged = initial_Framework();
+        isConverged = initial_Framework_reportActiveEdge();
 
         uint32_t iterationCount = 0;
         while (!isConverged)
@@ -442,6 +600,7 @@ public:
             Stopwatch sw_iteration_time(true);
             uint32_t numPartitionToProcess = 0;
             uint32_t numActiveNodes = 0;
+            uint32_t numActiveEdges = 0;
             uint32_t streamIdx = 0;
             for (int i = 0; i < m_graph->get_num_partitions(); i++)
             {
@@ -451,14 +610,17 @@ public:
                 }
                 else
                 {
+                    streamIdx++;
+                    if (streamIdx == FLAGS_nStreams)
+                    {
+                        streamIdx = 1;
+                    }
+
                     numPartitionToProcess++;
                     numActiveNodes += m_graph->get_partition_numActiveNodes(i);
+                    numActiveEdges += m_graph->get_numActiveEdge_counter_value(i, m_streams[streamIdx]);
                 }
-                streamIdx++;
-                if (streamIdx == FLAGS_nStreams)
-                {
-                    streamIdx = 1;
-                }
+
                 if(m_vec_dataTransferType_perPartition[i] == dataTransferType::Explicit_Filter)
                 {
                     // printf("iteration: %d partition: %d Explicit_Filter", iterationCount, i);
@@ -484,9 +646,9 @@ public:
             }
             CHECK_LAST_CUDA_ERROR();
 
-            isConverged = rebuild_workList_check_converge();
+            isConverged = rebuild_workList_check_converge_reportActiveEdgeCount();
             sw_iteration_time.stop();
-            printf("iteration: %d time: %f ms, numPartitionProcessed: %u numActiveNodes: %u\n", iterationCount, sw_iteration_time.ms(), numPartitionToProcess, numActiveNodes);
+            printf("iteration: %d iteration_time: %f ms, numPartitionProcessed: %u Cur_numActiveNodes: %u Cur_numActiveEdges: %u\n", iterationCount, sw_iteration_time.ms(), numPartitionToProcess, numActiveNodes, numActiveEdges);
             iterationCount++;
             if (iterationCount == 1000)
             {
@@ -517,7 +679,8 @@ int main(int argc, char **argv)
         Stopwatch sw_run_time(true);
         engine.start();
         sw_run_time.stop();
-        printf("run %d time: %f ms\n", i, sw_run_time.ms());
+        printf("run_id %d Exec_time: %f ms\n", i, sw_run_time.ms());
+        g.reset_UM_edgeList();
     }
 
 

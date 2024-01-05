@@ -93,6 +93,12 @@ private:
     uint32_t *m_host_arr_edgeList;
     uint32_t *m_dev_zeroCopy_arr_edgeList;
     uint32_t *m_unifiedMem_arr_edgeList;
+    uint8_t *m_managed_arr_activeNodesLabeling;
+    uint32_t *m_managed_arr_prefixLabeling;
+    uint32_t *m_managed_activeNodesDegree;
+    uint32_t *m_managed_prefixSumDegree;
+    uint32_t *m_managed_arr_subGraph_edgeStartIndex_CSR;
+
     std::vector<TValue> m_vec_host_node_value_datum;
     std::vector<uint32_t> m_vec_partition_start_node;
     std::vector<uint32_t> m_vec_partition_start_edge;
@@ -103,17 +109,20 @@ private:
 
     uint32_t m_num_partitions;
 
-    std::vector<uint32_t *> m_vec_dev_worklist_perPartition;
+    std::vector<uint32_t *> m_vec_managed_worklist_perPartition;
     std::vector<uint32_t *> m_vec_dev_worklist_counter_perPartition;
+    std::vector<uint32_t *> m_vec_dev_numActiveEdge_counter_perPartition;
     std::vector<uint32_t> m_vec_partition_numActiveNodes;
 
 
 public:
     Graph() : m_num_nodes(0), m_num_edges(0), m_isWeighted(false),
               m_host_arr_node_edgeStartIndex_CSR(nullptr), m_host_arr_edgeList(nullptr), m_dev_zeroCopy_arr_edgeList(nullptr),m_unifiedMem_arr_edgeList(nullptr),
-               m_num_partitions(0),
+               m_num_partitions(0),m_managed_arr_activeNodesLabeling(nullptr),m_managed_activeNodesDegree(nullptr),m_managed_arr_prefixLabeling(nullptr),
+               m_managed_prefixSumDegree(nullptr),m_managed_arr_subGraph_edgeStartIndex_CSR(nullptr),
               m_dev_arr_node_edgeStartIndex_CSR(nullptr),
-              m_dev_node_buffer_datum(nullptr), m_dev_node_value_datum(nullptr){};
+              m_dev_node_buffer_datum(nullptr), m_dev_node_value_datum(nullptr)
+              {};
     ~Graph(){
         if(m_host_arr_node_edgeStartIndex_CSR != nullptr)
             delete[] m_host_arr_node_edgeStartIndex_CSR;
@@ -125,22 +134,37 @@ public:
             CHECK_CUDA_ERROR(cudaFree(m_dev_node_value_datum));
         if(m_dev_node_buffer_datum != nullptr)
             CHECK_CUDA_ERROR(cudaFree(m_dev_node_buffer_datum));
-
-        for(int i = 0; i < m_vec_dev_worklist_perPartition.size(); i++)
+        if(m_managed_arr_activeNodesLabeling != nullptr)
+            CHECK_CUDA_ERROR(cudaFree(m_managed_arr_activeNodesLabeling));
+        if(m_managed_arr_prefixLabeling != nullptr)
+            CHECK_CUDA_ERROR(cudaFree(m_managed_arr_prefixLabeling));
+        if(m_managed_activeNodesDegree != nullptr)
+            CHECK_CUDA_ERROR(cudaFree(m_managed_activeNodesDegree));
+        if(m_managed_arr_subGraph_edgeStartIndex_CSR != nullptr)
+            CHECK_CUDA_ERROR(cudaFree(m_managed_arr_subGraph_edgeStartIndex_CSR));
+        if(m_managed_prefixSumDegree != nullptr)
+            CHECK_CUDA_ERROR(cudaFree(m_managed_prefixSumDegree));
+        for(int i = 0; i < m_vec_managed_worklist_perPartition.size(); i++)
         {
-            if(m_vec_dev_worklist_perPartition[i] != nullptr)
-                CHECK_CUDA_ERROR(cudaFree(m_vec_dev_worklist_perPartition[i]));
+            if(m_vec_managed_worklist_perPartition[i] != nullptr)
+                CHECK_CUDA_ERROR(cudaFree(m_vec_managed_worklist_perPartition[i]));
         }
         for(int i = 0; i < m_vec_dev_worklist_counter_perPartition.size(); i++)
         {
             if(m_vec_dev_worklist_counter_perPartition[i] != nullptr)
                 CHECK_CUDA_ERROR(cudaFree(m_vec_dev_worklist_counter_perPartition[i]));
         }
+        for(int i = 0; i < m_vec_dev_numActiveEdge_counter_perPartition.size(); i++)
+        {
+            if(m_vec_dev_numActiveEdge_counter_perPartition[i] != nullptr)
+                CHECK_CUDA_ERROR(cudaFree(m_vec_dev_numActiveEdge_counter_perPartition[i]));
+        }
         for(int i = 0; i < m_vec_dev_edgeList_perPartition.size(); i++)
         {
             if(m_vec_dev_edgeList_perPartition[i] != nullptr)
                 CHECK_CUDA_ERROR(cudaFree(m_vec_dev_edgeList_perPartition[i]));
         }
+
         if(m_unifiedMem_arr_edgeList != nullptr)
             CHECK_CUDA_ERROR(cudaFree(m_unifiedMem_arr_edgeList));
     };
@@ -163,25 +187,57 @@ public:
     {
         return m_num_nodes;
     }
+    uint32_t get_num_edges()
+    {
+        return m_num_edges;
+    }
+
     uint32_t get_num_partitions()
     {
         return m_num_partitions;
     }
-
+    uint8_t* get_managed_activeNodesLabeling_ptr()
+    {
+        return m_managed_arr_activeNodesLabeling;
+    }
+    uint32_t* get_managed_prefixLabeling_ptr()
+    {
+        return m_managed_arr_prefixLabeling;
+    }
+    uint32_t* get_managed_activeNodesDegree_ptr()
+    {
+        return m_managed_activeNodesDegree;
+    }
+    uint32_t* get_managed_prefixSumDegree_ptr()
+    {
+        return m_managed_prefixSumDegree;
+    }
+    uint32_t* get_managed_subGraph_edgeStartIndex_CSR_ptr()
+    {
+        return m_managed_arr_subGraph_edgeStartIndex_CSR;
+    }
     uint32_t get_partition_numActiveNodes(uint32_t partition_id)
     {
         return m_vec_partition_numActiveNodes[partition_id];
     }
+    uint32_t get_partition_numActiveEdges(uint32_t partition_id)
+    {
+        return 0;
+    }
+
     void set_partition_numActiveNodes(uint32_t partition_id, uint32_t numActiveNodes)
     {
         m_vec_partition_numActiveNodes[partition_id] = numActiveNodes;
     }
 
-    uint32_t get_host_array_node_edgeStartIndex_CSR(uint32_t node_id)
+    uint32_t get_edgeStartIndex(uint32_t node_id)
     {
         return m_host_arr_node_edgeStartIndex_CSR[node_id];
     }
-
+    uint32_t* get_host_array_node_edgeStartIndex_CSR_ptr()
+    {
+        return m_host_arr_node_edgeStartIndex_CSR;
+    }
 
     uint32_t* get_device_node_edgeStartIndex_CSR_ptr()
     {
@@ -237,12 +293,16 @@ public:
 
     std::vector<uint32_t *> get_vector_device_worklist_ptr()
     {
-        return m_vec_dev_worklist_perPartition;
+        return m_vec_managed_worklist_perPartition;
     }
 
     std::vector<uint32_t *> get_vector_device_worklist_counter_ptr()
     {
         return m_vec_dev_worklist_counter_perPartition;
+    }
+    std::vector<uint32_t *> get_vector_device_numActiveEdge_counter_ptr()
+    {
+        return m_vec_dev_numActiveEdge_counter_perPartition;
     }
 
     uint32_t get_worklist_counter_value(uint32_t partition_id, cudaStream_t streamIdx)
@@ -250,6 +310,12 @@ public:
         uint32_t worklist_counter;
         CHECK_CUDA_ERROR(cudaMemcpyAsync(&worklist_counter, m_vec_dev_worklist_counter_perPartition[partition_id], sizeof(uint32_t), cudaMemcpyDeviceToHost, streamIdx));
         return worklist_counter;
+    }
+    uint32_t get_numActiveEdge_counter_value(uint32_t partition_id, cudaStream_t streamIdx)
+    {
+        uint32_t numActiveEdge_counter;
+        CHECK_CUDA_ERROR(cudaMemcpyAsync(&numActiveEdge_counter, m_vec_dev_numActiveEdge_counter_perPartition[partition_id], sizeof(uint32_t), cudaMemcpyDeviceToHost, streamIdx));
+        return numActiveEdge_counter;
     }
 
     std::string get_File_Extension(std::string fileName)
@@ -326,6 +392,11 @@ public:
             CHECK_CUDA_ERROR(cudaMallocHost(&m_host_arr_edgeList, (m_num_edges) * sizeof(uint32_t)));
             CHECK_CUDA_ERROR(cudaHostGetDevicePointer(&m_dev_zeroCopy_arr_edgeList, m_host_arr_edgeList, 0));
             CHECK_CUDA_ERROR(cudaMallocManaged(&m_unifiedMem_arr_edgeList, (m_num_edges) * sizeof(uint32_t)));
+            CHECK_CUDA_ERROR(cudaMallocManaged(&m_managed_arr_activeNodesLabeling, (m_num_nodes)*sizeof(uint8_t)));
+            CHECK_CUDA_ERROR(cudaMallocManaged(&m_managed_arr_prefixLabeling, (m_num_nodes)*sizeof(uint32_t)));
+            CHECK_CUDA_ERROR(cudaMallocManaged(&m_managed_activeNodesDegree, (m_num_nodes)*sizeof(uint32_t)));
+            CHECK_CUDA_ERROR(cudaMallocManaged(&m_managed_prefixSumDegree, (m_num_nodes)*sizeof(uint32_t)));
+            CHECK_CUDA_ERROR(cudaMallocManaged(&m_managed_arr_subGraph_edgeStartIndex_CSR, (m_num_nodes + 1)*sizeof(uint32_t)));
 
             uint32_t *degree = new uint32_t[m_num_nodes];
             uint32_t counter = 0;
@@ -418,14 +489,20 @@ public:
                 uint32_t *dev_worklist;
                 uint32_t node_partionSize = m_vec_partition_start_node[i + 1] - m_vec_partition_start_node[i];
                 // printf("partition %d size: %d\n", i, node_partionSize);
-                CHECK_CUDA_ERROR(cudaMalloc(&dev_worklist, node_partionSize * sizeof(uint32_t)));
-                m_vec_dev_worklist_perPartition.push_back(dev_worklist);
+                CHECK_CUDA_ERROR(cudaMallocManaged(&dev_worklist, node_partionSize * sizeof(uint32_t)));
+                m_vec_managed_worklist_perPartition.push_back(dev_worklist);
                 uint32_t *dev_worklist_counter;
                 CHECK_CUDA_ERROR(cudaMalloc(&dev_worklist_counter, sizeof(uint32_t)));
                 CHECK_CUDA_ERROR(cudaMemset(dev_worklist_counter, 0, sizeof(uint32_t)));
                 m_vec_dev_worklist_counter_perPartition.push_back(dev_worklist_counter);
+
+                uint32_t *dev_numActiveEdge_counter;
+                CHECK_CUDA_ERROR(cudaMalloc(&dev_numActiveEdge_counter, sizeof(uint32_t)));
+                CHECK_CUDA_ERROR(cudaMemset(dev_numActiveEdge_counter, 0, sizeof(uint32_t)));
+                m_vec_dev_numActiveEdge_counter_perPartition.push_back(dev_numActiveEdge_counter);
+
             }
-            printf("m_vec_dev_worklist_perPartition size: %d\n", m_vec_dev_worklist_perPartition.size());
+            printf("m_vec_managed_worklist_perPartition size: %d\n", m_vec_managed_worklist_perPartition.size());
             printf("m_vec_dev_worklist_counter_perPartition size: %d\n", m_vec_dev_worklist_counter_perPartition.size());
 
             for (int i = 0; i < FLAGS_nStreams; i++)
@@ -444,6 +521,22 @@ public:
         std::cout << "Loading graph Time: " << sw.ms() << " ms" << std::endl;
     };
 
+    void reset_UM_edgeList()
+    {
+        //new a array temp to store m_unifiedMem_arr_edgeList content
+        uint32_t *temp = new uint32_t[m_num_edges];
+        //copy m_unifiedMem_arr_edgeList to temp
+        memcpy(temp, m_unifiedMem_arr_edgeList, m_num_edges*sizeof(uint32_t));
+        //memset m_unifiedMem_arr_edgeList to 0
+        memset(m_unifiedMem_arr_edgeList, 0, m_num_edges*sizeof(uint32_t));
+        printf("%u %u %u\n", m_unifiedMem_arr_edgeList[0], m_unifiedMem_arr_edgeList[m_num_edges/2], m_unifiedMem_arr_edgeList[m_num_edges-1]);
+        //copy temp to m_unifiedMem_arr_edgeList
+        memcpy(m_unifiedMem_arr_edgeList, temp, m_num_edges*sizeof(uint32_t));
+        //free temp
+        delete[] temp;
+        printf("UM edgeList reset done\n");
+
+    }
 
     void rankNodeByDegree(std::string filename)
     {

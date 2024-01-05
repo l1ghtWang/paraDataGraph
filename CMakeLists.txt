@@ -9,15 +9,15 @@ set(CMAKE_CUDA_ARCHITECTURES 86)
 
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
     message("Debug mode")
-        set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS};-gencode;arch=compute_86,code=sm_86;-g;-G;-lineinfo;-Xcompiler;-ggdb;-std=c++17 -O0)
+        set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS};-lpthread;-gencode;arch=compute_86,code=sm_86;-g;-G;-lineinfo;-Xcompiler;-ggdb;-std=c++17 -O0)
 else ()
-    set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS};-gencode;arch=compute_86,code=sm_86;-O3;-Xcompiler;-DNDEBUG;-std=c++17 -O3)
+    set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS};-lpthread;-gencode;arch=compute_86,code=sm_86;-O3;-Xcompiler;-DNDEBUG;-std=c++17 -O3)
 endif ()
 
 # GFlags
 add_subdirectory(external/gflags)
 
-set(EXTRA_LIBS gflags)
+set(EXTRA_LIBS gflags pthread)
 
 include_directories(${PROJECT_SOURCE_DIR}/include)
 

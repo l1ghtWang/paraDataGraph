@@ -53,7 +53,8 @@
         "optional": "cpp",
         "string_view": "cpp",
         "memory": "cpp",
-        "queue": "cpp"
+        "queue": "cpp",
+        "thread": "cpp"
     },
     "cmake.copyCompileCommands": "/home/yugwang/paraDataGraph/build"
 }
