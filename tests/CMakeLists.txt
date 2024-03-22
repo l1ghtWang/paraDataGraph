@@ -19,6 +19,9 @@ target_link_libraries(test_SSSP_UMonly ${EXTRA_LIBS})
 cuda_add_executable(test_SSSP_ZConly test_SSSP_ZConly.cu)
 target_link_libraries(test_SSSP_ZConly ${EXTRA_LIBS})
 
+cuda_add_executable(test_SSSP_ZConly_displayAllActiveNodes test_SSSP_ZConly_displayAllActiveNodes.cu)
+target_link_libraries(test_SSSP_ZConly_displayAllActiveNodes ${EXTRA_LIBS})
+
 cuda_add_executable(test_SSSP_ZConly_partitionInfo_activeNode test_SSSP_ZConly_partitionInfo_activeNode.cu)
 target_link_libraries(test_SSSP_ZConly_partitionInfo_activeNode ${EXTRA_LIBS})
 

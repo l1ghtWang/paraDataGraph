@@ -19,12 +19,29 @@ DECLARE_uint32(partition_size_MB);
 DEFINE_uint32(source_node, 0, "source node");
 DECLARE_uint32(nStreams);
 DEFINE_bool(check, false, "check result");
-DEFINE_uint32(num_run, 10, "number of run");
+DEFINE_uint32(num_run, 5, "number of run");
+DEFINE_string(dataTransferType, "EF_ZC", "data transfer type");
+DEFINE_string(kernelConfigVariant, "sync_push_dd", "kernel config variant");
 
 inline __host__ __device__ size_t round_up_divide(size_t numerator, size_t denominator) 
 {
     return (numerator + denominator - 1) / denominator;
 }
+
+enum class dataTransferType
+{
+    Explicit_Filter,
+    Unified_Memory,
+    Zero_Copy,
+    Explicit_Compaction
+};
+
+enum class kernelConfigVariant
+{
+    sync_push_dd,
+    sync_push_td
+};
+
 
 namespace SSSP
 {
@@ -134,7 +151,6 @@ namespace SSSP
                               uint32_t *activeNodesDegree)
     {
             uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-            uint32_t nthreads = blockDim.x * gridDim.x;
             uint32_t work_size = num_node_inPartition;
 
             if(tid < work_size)
@@ -148,6 +164,20 @@ namespace SSSP
                 }
             }
     }
+
+    __global__ void makeQueue_curPartition(uint32_t num_node_inPartition,
+                                            uint32_t startNodeIdx,
+                                            uint32_t *activeNodes_curPartition, 
+                                            uint8_t *activeNodesLabeling_curPartition,
+                                            uint32_t *prefixLabeling_curPartition)
+    {
+        uint32_t tid = blockDim.x * blockIdx.x + threadIdx.x;
+        uint32_t node = tid + startNodeIdx;
+        if(tid < num_node_inPartition && activeNodesLabeling_curPartition[tid] == 1){
+            uint32_t queueLocation = prefixLabeling_curPartition[tid];
+            activeNodes_curPartition[queueLocation] = node;
+        }
+    }
     __global__ void make_subGraph_edgeStartIndex_CSR(uint32_t num_node_inPartition,
                                                      uint32_t startNodeIdx,
                                                      uint8_t *activeNodesLabeling,
@@ -157,6 +187,7 @@ namespace SSSP
     {
         uint32_t tid = blockDim.x * blockIdx.x + threadIdx.x;
         uint32_t node = tid + startNodeIdx;
+
         if(tid < num_node_inPartition && activeNodesLabeling[node] == 1){
             arr_subGraph_edgeStartIndex_CSR_curPartition[prefixLabeling_curPartition[tid]] = prefixSumDegrees_curPartition[tid];
         }
@@ -190,6 +221,36 @@ namespace SSSP
 
         }
     }
+
+    __global__ void kernel_SSSP_sync_push_td(uint32_t work_size,
+                                             uint32_t partition_start_node,
+                                             uint32_t *dev_node_value_datum,
+                                             uint32_t *dev_node_buffer_datum,
+                                             uint32_t *dev_edgeList,
+                                             uint32_t partition_start_edge_offset,
+                                             uint32_t *dev_arr_node_edgeStartIndex_CSR)
+    {
+        uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+        if(tid < work_size)
+        {
+            uint32_t node = tid + partition_start_node;
+            if(dev_node_value_datum[node] > dev_node_buffer_datum[node])
+            {
+                dev_node_value_datum[node] = dev_node_buffer_datum[node];
+                // uint32_t edge_loc =
+                uint32_t edge_start = dev_arr_node_edgeStartIndex_CSR[node] - partition_start_edge_offset;
+                uint32_t edge_end = dev_arr_node_edgeStartIndex_CSR[node + 1] - partition_start_edge_offset;
+                for (uint32_t edge = edge_start; edge < edge_end; edge++)
+                {
+                    uint32_t dst_node = dev_edgeList[edge];
+                    uint32_t new_dist = dev_node_buffer_datum[node] + 1;
+                    atomicMin(&dev_node_buffer_datum[dst_node], new_dist);
+                }
+            }
+
+        }
+    }
+
     __global__ void kernel_SSSP_zeroCopy_sync_push_dd(uint32_t work_size,
                                              uint32_t *dev_node_value_datum,
                                              uint32_t *dev_node_buffer_datum,
@@ -216,6 +277,34 @@ namespace SSSP
             }
         }
     }
+
+    __global__ void kernel_SSSP_zeroCopy_sync_push_td(uint32_t work_size,
+                                             uint32_t partition_start_node,
+                                             uint32_t *dev_node_value_datum,
+                                             uint32_t *dev_node_buffer_datum,
+                                             uint32_t *dev_edgeList,
+                                             uint32_t *dev_arr_node_edgeStartIndex_CSR)
+    {
+        uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+        if(tid < work_size)
+        {
+            uint32_t node = tid + partition_start_node;
+            if (dev_node_value_datum[node] > dev_node_buffer_datum[node])
+            {
+                dev_node_value_datum[node] = dev_node_buffer_datum[node];
+                // uint32_t edge_loc =
+                uint32_t edge_start = dev_arr_node_edgeStartIndex_CSR[node];
+                uint32_t edge_end = dev_arr_node_edgeStartIndex_CSR[node + 1];
+                for (uint32_t edge = edge_start; edge < edge_end; edge++)
+                {
+                    uint32_t dst_node = dev_edgeList[edge];
+                    uint32_t new_dist = dev_node_buffer_datum[node] + 1;
+                    atomicMin(&dev_node_buffer_datum[dst_node], new_dist);
+                }
+            }
+        }
+    }
+
 
     __global__ void kernel_SSSP_compaction_sync_push_dd(uint32_t work_size,
                                                         uint32_t *dev_node_value_datum,
@@ -319,39 +408,19 @@ namespace SSSP
     }
 };
 
-enum class dataTransferType
-{
-    Explicit_Filter,
-    Unified_Memory,
-    Zero_Copy,
-    Explicit_Compaction
-};
 
-// __global__
-// void kernel_print_edgeList(uint32_t *dev_edgeList)
-// {
-//     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-//     if(tid == 0)
-//     {
-//         for(int i = 0; i < 5; i++)
-//         {
-//             printf("%u ", dev_edgeList[i]);
-//         }
-//         printf("\n");
-//     }
-
-// }
     void compact_dynamic(uint32_t tId,
                          uint32_t numThreads,
                          uint32_t numActiveNodes,
-                         uint32_t *activeNodes,
+                         uint32_t *activeNodes_curParition,
                          uint32_t *subgraph_edgeStartIndex_CSR_curPartition,
                          uint32_t *edgeStartIndex_CSR,
                          uint32_t *activeEdgeList,
                          uint32_t *edgeList)
     {
 
-        uint32_t chunkSize = ceil(numActiveNodes / numThreads);
+        uint32_t chunkSize = (numActiveNodes / numThreads)+1;
+
         uint32_t left, right;
         left = tId * chunkSize;
         right = min(left + chunkSize, numActiveNodes);
@@ -360,10 +429,9 @@ enum class dataTransferType
         uint32_t thisDegree;
         uint32_t fromHere;
         uint32_t fromThere;
-
         for (uint32_t i = left; i < right; i++)
         {
-            thisNode = activeNodes[i];
+            thisNode = activeNodes_curParition[i];
             thisDegree = subgraph_edgeStartIndex_CSR_curPartition[i + 1] - subgraph_edgeStartIndex_CSR_curPartition[i];
             fromHere = subgraph_edgeStartIndex_CSR_curPartition[i];
             fromThere = edgeStartIndex_CSR[thisNode];
@@ -381,6 +449,7 @@ private:
     cudaStream_t *m_streams;
     Graph<SSSP_TVALUE> *m_graph;
     std::vector<dataTransferType> m_vec_dataTransferType_perPartition;
+    std::vector<kernelConfigVariant> m_vec_kernelConfigVariant_perPartition;
 public:
     Engine_SSSP() : m_graph(nullptr), m_streams(nullptr)
     {
@@ -453,13 +522,41 @@ public:
             // printf("partition: %d numItemInWorkList: %u\n", i, numItemInWorkList);
         }
         CHECK_LAST_CUDA_ERROR();
-        // m_vec_dataTransferType_perPartition = std::vector<dataTransferType>(m_graph->get_num_partitions(), dataTransferType::Explicit_Filter);
-        // printf("all EF\n");
-        m_vec_dataTransferType_perPartition = std::vector<dataTransferType>(m_graph->get_num_partitions(), dataTransferType::Zero_Copy);
-        // printf("all ZC\n");
-        // m_vec_dataTransferType_perPartition = std::vector<dataTransferType>(m_graph->get_num_partitions(), dataTransferType::Unified_Memory);
-        // printf("all UM\n");
+        if(FLAGS_dataTransferType == "EF_ZC" || FLAGS_dataTransferType =="Zero_Copy")
+        {
+            m_vec_dataTransferType_perPartition = std::vector<dataTransferType>(m_graph->get_num_partitions(), dataTransferType::Zero_Copy);
+        }
+        else if(FLAGS_dataTransferType =="Explicit_Filter")
+        {
+            m_vec_dataTransferType_perPartition = std::vector<dataTransferType>(m_graph->get_num_partitions(), dataTransferType::Explicit_Filter);
+        }
+        else if(FLAGS_dataTransferType =="Unified_Memory")
+        {
+            m_vec_dataTransferType_perPartition = std::vector<dataTransferType>(m_graph->get_num_partitions(), dataTransferType::Unified_Memory);
+        }
+        else if(FLAGS_dataTransferType =="Explicit_Compaction")
+        {
+            m_vec_dataTransferType_perPartition = std::vector<dataTransferType>(m_graph->get_num_partitions(), dataTransferType::Explicit_Compaction);
+        }
+        else
+        {
+            printf("Error: dataTransferType is not supported\n");
+            exit(0);
+        }
 
+        if(FLAGS_kernelConfigVariant == "sync_push_dd")
+        {
+            m_vec_kernelConfigVariant_perPartition = std::vector<kernelConfigVariant>(m_graph->get_num_partitions(), kernelConfigVariant::sync_push_dd);
+        }
+        else if(FLAGS_kernelConfigVariant == "sync_push_td")
+        {
+            m_vec_kernelConfigVariant_perPartition = std::vector<kernelConfigVariant>(m_graph->get_num_partitions(), kernelConfigVariant::sync_push_td);
+        }
+        else
+        {
+            printf("Error: kernelConfigVariant is not supported\n");
+            exit(0);
+        }
         return isConverged;
     }
 
@@ -481,7 +578,7 @@ public:
             }
             uint32_t startNodeIdx = m_graph->get_partition_start_node(i);
             uint32_t numNodesInPartition = m_graph->get_partition_start_node(i + 1) - m_graph->get_partition_start_node(i);
-            SSSP::kernel_RebuildWorklist_reportActiveEdge_perPartition<<<numNodesInPartition / 512 + 1, 512, 0, m_streams[streamIdx]>>>(startNodeIdx,
+            SSSP::kernel_RebuildWorklist_reportActiveEdge_perPartition<<<round_up_divide(numNodesInPartition,512), 512, 0, m_streams[streamIdx]>>>(startNodeIdx,
                                                                                                                        numNodesInPartition,
                                                                                                                        m_graph->get_device_value_ptr(),
                                                                                                                        m_graph->get_device_buffer_ptr(),
@@ -493,6 +590,7 @@ public:
 
         bool isConverged = true;
         streamIdx = 0;
+        printf("Next_numActiveEdgePerPartition: ");
         for (int i = 0; i < m_graph->get_num_partitions(); i++)
         {
             streamIdx++;
@@ -501,17 +599,51 @@ public:
                 streamIdx = 1;
             }
             uint32_t numItemInWorkList = m_graph->get_worklist_counter_value(i, m_streams[streamIdx]);
+            uint32_t numActiveEdge = m_graph->get_numActiveEdge_counter_value(i, m_streams[streamIdx]);
+            printf(" %u", numActiveEdge);
             m_graph->set_partition_numActiveNodes(i, numItemInWorkList);
             isConverged &= (numItemInWorkList == 0);
             // printf("partition: %d numItemInWorkList: %u\n", i, numItemInWorkList);
         }
+        printf("\n");
         CHECK_LAST_CUDA_ERROR();
-        // m_vec_dataTransferType_perPartition = std::vector<dataTransferType>(m_graph->get_num_partitions(), dataTransferType::Explicit_Filter);
-        // printf("all EF\n");
-        m_vec_dataTransferType_perPartition = std::vector<dataTransferType>(m_graph->get_num_partitions(), dataTransferType::Zero_Copy);
-        // printf("all ZC\n");
-        // m_vec_dataTransferType_perPartition = std::vector<dataTransferType>(m_graph->get_num_partitions(), dataTransferType::Unified_Memory);
-        // printf("all UM\n");
+        std::cout<<"dataTransferType: "<<FLAGS_dataTransferType<<std::endl;
+        if(FLAGS_dataTransferType == "EF_ZC" || FLAGS_dataTransferType =="Zero_Copy")
+        {
+            m_vec_dataTransferType_perPartition = std::vector<dataTransferType>(m_graph->get_num_partitions(), dataTransferType::Zero_Copy);
+        }
+        else if(FLAGS_dataTransferType =="Explicit_Filter")
+        {
+            m_vec_dataTransferType_perPartition = std::vector<dataTransferType>(m_graph->get_num_partitions(), dataTransferType::Explicit_Filter);
+        }
+        else if(FLAGS_dataTransferType =="Unified_Memory")
+        {
+            m_vec_dataTransferType_perPartition = std::vector<dataTransferType>(m_graph->get_num_partitions(), dataTransferType::Unified_Memory);
+        }
+        else if(FLAGS_dataTransferType =="Explicit_Compaction")
+        {
+            m_vec_dataTransferType_perPartition = std::vector<dataTransferType>(m_graph->get_num_partitions(), dataTransferType::Explicit_Compaction);
+        }
+        else
+        {
+            printf("Error: dataTransferType is not supported\n");
+            exit(0);
+        }
+
+        if(FLAGS_kernelConfigVariant == "sync_push_dd")
+        {
+            m_vec_kernelConfigVariant_perPartition = std::vector<kernelConfigVariant>(m_graph->get_num_partitions(), kernelConfigVariant::sync_push_dd);
+        }
+        else if(FLAGS_kernelConfigVariant == "sync_push_td")
+        {
+            m_vec_kernelConfigVariant_perPartition = std::vector<kernelConfigVariant>(m_graph->get_num_partitions(), kernelConfigVariant::sync_push_td);
+        }
+        else
+        {
+            printf("Error: kernelConfigVariant is not supported\n");
+            exit(0);
+        }
+        std::cout<<"initial kernelConfigVariant: "<<FLAGS_kernelConfigVariant<<std::endl;
 
         return isConverged;
     }
@@ -552,6 +684,7 @@ public:
             }
 
             uint32_t numItemInWorkList = m_graph->get_worklist_counter_value(i, m_streams[streamIdx]);
+            /*
             //determine data transfer type for next iteration
             uint32_t numNode_inPartition = m_graph->get_partition_start_node(i + 1) - m_graph->get_partition_start_node(i);
             if((float)numItemInWorkList < (0.4*numNode_inPartition))
@@ -564,6 +697,7 @@ public:
                 m_vec_dataTransferType_perPartition[i] = dataTransferType::Explicit_Filter;
                 num_EF_nextIteration++;
             }
+            */
             m_graph->set_partition_numActiveNodes(i, numItemInWorkList);
             printf(" %u", numItemInWorkList);
             isConverged &= (numItemInWorkList == 0);
@@ -613,17 +747,21 @@ public:
             uint32_t numItemInWorkList = m_graph->get_worklist_counter_value(i, m_streams[streamIdx]);
             uint32_t numActiveEdge = m_graph->get_numActiveEdge_counter_value(i, m_streams[streamIdx]);
             //determine data transfer type for next iteration
-            // uint32_t numNode_inPartition = m_graph->get_partition_start_node(i + 1) - m_graph->get_partition_start_node(i);
-            // if((float)numItemInWorkList < (0.4*numNode_inPartition))
-            // {
-            //     m_vec_dataTransferType_perPartition[i] = dataTransferType::Zero_Copy;
-            //     num_ZC_nextIteration++;
-            // }
-            // else
-            // {
-            //     m_vec_dataTransferType_perPartition[i] = dataTransferType::Explicit_Filter;
-            //     num_EF_nextIteration++;
-            // }
+            if(FLAGS_dataTransferType == "EF_ZC")
+            {
+                uint32_t numNode_inPartition = m_graph->get_partition_start_node(i + 1) - m_graph->get_partition_start_node(i);
+                if((float)numItemInWorkList < (0.4*numNode_inPartition))
+                {
+                    m_vec_dataTransferType_perPartition[i] = dataTransferType::Zero_Copy;
+                    num_ZC_nextIteration++;
+                }
+                else
+                {
+                    m_vec_dataTransferType_perPartition[i] = dataTransferType::Explicit_Filter;
+                    num_EF_nextIteration++;
+                }
+            }
+
             m_graph->set_partition_numActiveNodes(i, numItemInWorkList);
             printf(" %u", numActiveEdge);
             isConverged &= (numItemInWorkList == 0);
@@ -638,34 +776,63 @@ public:
         uint32_t startNodeIdx = m_graph->get_partition_start_node(partitionIdx);
         uint32_t numNodesInPartition = m_graph->get_partition_start_node(partitionIdx + 1) - m_graph->get_partition_start_node(partitionIdx);
         uint32_t numEdgesInPartition = m_graph->get_partition_start_edge(partitionIdx + 1) - m_graph->get_partition_start_edge(partitionIdx);
-        uint32_t *dev_edgeList_curPartiton = m_graph->get_device_edgeList_ptr(streamIdx);
+        uint32_t numActiveNodeInPartition = m_graph->get_partition_numActiveNodes(partitionIdx);
+        uint32_t dev_edgeList_idx = streamIdx - 1; //first available stream is 1, stream 0 is avoid
+        uint32_t *dev_edgeList_curPartiton = m_graph->get_device_edgeList_ptr(dev_edgeList_idx);
         cudaMemcpyAsync(dev_edgeList_curPartiton,
                         m_graph->get_host_array_edgeList_ptr() + m_graph->get_partition_start_edge(partitionIdx),
                         numEdgesInPartition * sizeof(uint32_t),
                         cudaMemcpyHostToDevice,
                         m_streams[streamIdx]);
 
-        SSSP::kernel_SSSP_sync_push_dd<<<round_up_divide(numNodesInPartition,512), 512, 0, m_streams[streamIdx]>>>(numNodesInPartition,
+        if(m_vec_kernelConfigVariant_perPartition[partitionIdx] == kernelConfigVariant::sync_push_dd)
+        {
+            SSSP::kernel_SSSP_sync_push_dd<<<round_up_divide(numActiveNodeInPartition,512), 512, 0, m_streams[streamIdx]>>>(numActiveNodeInPartition,
                                                                                                         m_graph->get_device_value_ptr(),
                                                                                                         m_graph->get_device_buffer_ptr(),
                                                                                                         m_graph->get_vector_device_worklist_ptr()[partitionIdx],
                                                                                                         dev_edgeList_curPartiton,
                                                                                                         m_graph->get_partition_start_edge(partitionIdx),
                                                                                                         m_graph->get_device_node_edgeStartIndex_CSR_ptr());
+        }
+        else if(m_vec_kernelConfigVariant_perPartition[partitionIdx] == kernelConfigVariant::sync_push_td)
+        {
+            SSSP::kernel_SSSP_sync_push_td<<<round_up_divide(numNodesInPartition,512), 512, 0, m_streams[streamIdx]>>>(numNodesInPartition,
+                                                                                                        startNodeIdx,
+                                                                                                        m_graph->get_device_value_ptr(),
+                                                                                                        m_graph->get_device_buffer_ptr(),
+                                                                                                        dev_edgeList_curPartiton,
+                                                                                                        m_graph->get_partition_start_edge(partitionIdx),
+                                                                                                        m_graph->get_device_node_edgeStartIndex_CSR_ptr());
+        }
     }
     void ZC_process_partition(uint32_t partitionIdx, uint32_t streamIdx)
     {
         uint32_t startNodeIdx = m_graph->get_partition_start_node(partitionIdx);
+        uint32_t numActiveNodeInPartition = m_graph->get_partition_numActiveNodes(partitionIdx);
+
         uint32_t numNodesInPartition = m_graph->get_partition_start_node(partitionIdx + 1) - m_graph->get_partition_start_node(partitionIdx);
         uint32_t numEdgesInPartition = m_graph->get_partition_start_edge(partitionIdx + 1) - m_graph->get_partition_start_edge(partitionIdx);
         uint32_t *dev_edgeList_zeroCopy = m_graph->get_device_zeroCopy_edgeList_ptr();
 
-        SSSP::kernel_SSSP_zeroCopy_sync_push_dd<<<round_up_divide(numNodesInPartition,512), 512, 0, m_streams[streamIdx]>>>(numNodesInPartition,
+        if(m_vec_kernelConfigVariant_perPartition[partitionIdx] == kernelConfigVariant::sync_push_dd)
+        {
+            SSSP::kernel_SSSP_zeroCopy_sync_push_dd<<<round_up_divide(numActiveNodeInPartition,512), 512, 0, m_streams[streamIdx]>>>(numActiveNodeInPartition,
                                                                                                         m_graph->get_device_value_ptr(),
                                                                                                         m_graph->get_device_buffer_ptr(),
                                                                                                         m_graph->get_vector_device_worklist_ptr()[partitionIdx],
                                                                                                         dev_edgeList_zeroCopy,
                                                                                                         m_graph->get_device_node_edgeStartIndex_CSR_ptr());
+        }
+        else if(m_vec_kernelConfigVariant_perPartition[partitionIdx] == kernelConfigVariant::sync_push_td)
+        {
+            SSSP::kernel_SSSP_zeroCopy_sync_push_td<<<round_up_divide(numNodesInPartition,512), 512, 0, m_streams[streamIdx]>>>(numNodesInPartition,
+                                                                                                        startNodeIdx,
+                                                                                                        m_graph->get_device_value_ptr(),
+                                                                                                        m_graph->get_device_buffer_ptr(),
+                                                                                                        dev_edgeList_zeroCopy,
+                                                                                                        m_graph->get_device_node_edgeStartIndex_CSR_ptr());
+        }
     }
 
 
@@ -676,6 +843,7 @@ public:
         uint32_t numNodesInPartition = m_graph->get_partition_start_node(partitionIdx + 1) - m_graph->get_partition_start_node(partitionIdx);
         uint32_t numEdgesInPartition = m_graph->get_partition_start_edge(partitionIdx + 1) - m_graph->get_partition_start_edge(partitionIdx);
 
+        //if we want fast build_queue, we need this done for all partitions
         SSSP::compaction_prePrefix<<<round_up_divide(numNodesInPartition,512), 512, 0, m_streams[streamIdx]>>>(numNodesInPartition,
                                                                                                         startNodeIdx,
                                                                                                         m_graph->get_device_node_edgeStartIndex_CSR_ptr(),
@@ -683,97 +851,164 @@ public:
                                                                                                         m_graph->get_device_buffer_ptr(),
                                                                                                         m_graph->get_managed_activeNodesLabeling_ptr(),
                                                                                                         m_graph->get_managed_activeNodesDegree_ptr());
-
+        cudaStreamSynchronize(m_streams[streamIdx]);CHECK_LAST_CUDA_ERROR();
         thrust::device_ptr<uint8_t> ptr_labeling(m_graph->get_managed_activeNodesLabeling_ptr() + startNodeIdx);
         thrust::device_ptr<uint32_t> ptr_labeling_prefixsum(m_graph->get_managed_prefixLabeling_ptr() + startNodeIdx);
-        uint32_t num_subgraph_nodes = thrust::reduce(ptr_labeling, ptr_labeling + numNodesInPartition); //compute number of active nodes in current partition
+        uint32_t num_subgraph_nodes = thrust::reduce(ptr_labeling, ptr_labeling + numNodesInPartition,0); //compute number of active nodes in current partition
+// uint32_t num_worklist_item = m_graph->get_worklist_counter_value(partitionIdx, m_streams[streamIdx]);
+// std::cout<<"numNodesInPartition:"<<numNodesInPartition<<std::endl;
+// std::cout<<"num_worklist_item:"<<num_worklist_item<<std::endl;
+// std::cout<<"startNodeIdx:"<<startNodeIdx<<std::endl;
+// uint32_t num_labledNode_counter = 0;
+// uint32_t sum_labledNode = 0;
+// for(int i = 0; i < numNodesInPartition; i++)
+// {
+//     sum_labledNode += m_graph->get_managed_activeNodesLabeling_ptr()[i];
+//     if(m_graph->get_managed_activeNodesLabeling_ptr()[i] == 1)
+//         num_labledNode_counter++;
+// }
+// std::cout<<"sum_labledNode:"<<sum_labledNode<<std::endl;
+// std::cout<<"num_labledNode_counter:"<<num_labledNode_counter<<std::endl;
         thrust::exclusive_scan(ptr_labeling, ptr_labeling + numNodesInPartition, ptr_labeling_prefixsum);
+
+        SSSP::makeQueue_curPartition<<<round_up_divide(numNodesInPartition,512), 512, 0, m_streams[streamIdx]>>>(numNodesInPartition,
+                                                                                                        startNodeIdx,
+                                                                                                        m_graph->get_vector_device_worklist_ptr()[partitionIdx],
+                                                                                                        m_graph->get_managed_activeNodesLabeling_ptr() + startNodeIdx,
+                                                                                                        m_graph->get_managed_prefixLabeling_ptr() + startNodeIdx);
+        cudaStreamSynchronize(m_streams[streamIdx]);CHECK_LAST_CUDA_ERROR();
+// std::cout<<"num_subgraph_nodes:"<<num_subgraph_nodes<<std::endl;
+// std::cout<<"activeNodes: "<<std::endl;
+// for(int i = 0; i < num_subgraph_nodes; i++)
+// {
+//     uint32_t activeNode = m_graph->get_vector_device_worklist_ptr()[partitionIdx][i];
+//     // std::cout<<"m_graph->get_vector_device_worklist_ptr()[partitionIdx]["<<i<<"]:"<<m_graph->get_vector_device_worklist_ptr()[partitionIdx][i]<<std::endl;
+//     // std::cout<<"ptr_labeling_prefixsum["<<activeNode<<"]:"<<ptr_labeling_prefixsum[activeNode]<<std::endl;
+//     std::cout<<activeNode<<" ";
+
+// }
+// std::cout<<std::endl;
 
         thrust::device_ptr<uint32_t> ptr_degrees( m_graph->get_managed_activeNodesDegree_ptr()+ startNodeIdx);
         thrust::device_ptr<uint32_t> ptr_degrees_prefixsum(m_graph->get_managed_prefixSumDegree_ptr() + startNodeIdx);
 
 	    thrust::exclusive_scan(ptr_degrees, ptr_degrees + numNodesInPartition, ptr_degrees_prefixsum);
+
+// for(int i = 0; i < num_subgraph_nodes; i++)
+// {
+//     uint32_t activeNode = m_graph->get_vector_device_worklist_ptr()[partitionIdx][i];
+//     std::cout<<"ptr_degrees["<<activeNode<<"]:"<<ptr_degrees[activeNode]<<std::endl;
+//     std::cout<<"ptr_degrees_prefixsum["<<activeNode<<"]:"<<ptr_degrees_prefixsum[activeNode]<<std::endl;
+//     std::cout<<"m_graph->get_managed_prefixSumDegree_ptr() + startNodeIdx["<<activeNode<<"]:"<<(m_graph->get_managed_prefixSumDegree_ptr() + startNodeIdx)[activeNode]<<std::endl;
+
+// }
+
+
         SSSP::make_subGraph_edgeStartIndex_CSR<<<round_up_divide(numNodesInPartition,512), 512, 0, m_streams[streamIdx]>>>(numNodesInPartition,
                                                                                                         startNodeIdx,
                                                                                                         m_graph->get_managed_activeNodesLabeling_ptr(),
                                                                                                         m_graph->get_managed_subGraph_edgeStartIndex_CSR_ptr()+ startNodeIdx,
                                                                                                         m_graph->get_managed_prefixLabeling_ptr()+ startNodeIdx,
                                                                                                         m_graph->get_managed_prefixSumDegree_ptr()+ startNodeIdx);
+        cudaStreamSynchronize(m_streams[streamIdx]);
+        CHECK_LAST_CUDA_ERROR();
+// for(int i = 0; i < num_subgraph_nodes; i++)
+// {
+//     uint32_t activeNode = m_graph->get_vector_device_worklist_ptr()[partitionIdx][i];
+//     std::cout<<"m_graph->get_managed_subGraph_edgeStartIndex_CSR_ptr()["<<i<<"]:"<<m_graph->get_managed_subGraph_edgeStartIndex_CSR_ptr()[i]<<std::endl;
+
+// }
+// CHECK_LAST_CUDA_ERROR();
+
         uint32_t numActiveEdges_curPartition = 0;
         if (num_subgraph_nodes > 0)
         {
             uint32_t* arr_managed_worklist = m_graph->get_vector_device_worklist_ptr()[partitionIdx];
             uint32_t lastActiveNode_curPartition = arr_managed_worklist[num_subgraph_nodes - 1];
             uint32_t lastActiveNodeDegree_curPartition = m_graph->get_edgeStartIndex(lastActiveNode_curPartition+1) - m_graph->get_edgeStartIndex(lastActiveNode_curPartition);
-            numActiveEdges_curPartition = m_graph->get_managed_prefixSumDegree_ptr()[num_subgraph_nodes - 1]+lastActiveNodeDegree_curPartition;
+// std::cout<<"lastActiveNode_curPartition:"<<lastActiveNode_curPartition<<std::endl;
+// std::cout<<"lastActiveNodeDegree_curPartition:"<<lastActiveNodeDegree_curPartition<<std::endl;
+// std::cout<<"m_graph->get_managed_prefixSumDegree_ptr()[lastActiveNode_curPartition]"<<m_graph->get_managed_prefixSumDegree_ptr()[lastActiveNode_curPartition]<<std::endl;
+            numActiveEdges_curPartition = m_graph->get_managed_prefixSumDegree_ptr()[lastActiveNode_curPartition ]+lastActiveNodeDegree_curPartition;
+// std::cout<<"numActiveEdges_curPartition:"<<numActiveEdges_curPartition<<std::endl;
             m_graph->get_managed_subGraph_edgeStartIndex_CSR_ptr()[startNodeIdx+num_subgraph_nodes] = numActiveEdges_curPartition;
         }
-        uint32_t numThreads = 64;
+        uint32_t numThreads = 4;
 
         if (num_subgraph_nodes < 50000)
             numThreads = 1;
 
+        uint32_t *arr_activeEdgeList = new uint32_t[numActiveEdges_curPartition];
         std::thread runThreads[numThreads];
         for (unsigned int t = 0; t < numThreads; t++)
         {
-            uint32_t *arr_activeEdgeList = new uint32_t[numActiveEdges_curPartition];
+            
             uint32_t tid = t;
-            auto f = [&](uint32_t tid)
-            { compact_dynamic(
-                  tid,
-                  numThreads,
-                  num_subgraph_nodes,
-                  m_graph->get_vector_device_worklist_ptr()[partitionIdx],
-                  m_graph->get_managed_subGraph_edgeStartIndex_CSR_ptr() + startNodeIdx,
-                  m_graph->get_host_array_node_edgeStartIndex_CSR_ptr(),
-                  arr_activeEdgeList,
-                  m_graph->get_unifiedMem_array_edgeList_ptr()); 
-            };
 
-            runThreads[tid] = std::thread(f, tid);
+            runThreads[t] = std::thread(compact_dynamic,
+                                    tid,
+                                    numThreads,
+                                    num_subgraph_nodes,
+                                    m_graph->get_vector_device_worklist_ptr()[partitionIdx],
+                                    m_graph->get_managed_subGraph_edgeStartIndex_CSR_ptr() + startNodeIdx,
+                                    m_graph->get_host_array_node_edgeStartIndex_CSR_ptr(),
+                                    arr_activeEdgeList,
+                                    m_graph->get_unifiedMem_array_edgeList_ptr());
+        }
 
-            cudaMemcpyAsync(m_graph->get_device_edgeList_ptr(streamIdx),
+        for (unsigned int t = 0; t < numThreads; t++)
+            runThreads[t].join();
+        
+
+        uint32_t dev_edgeList_idx = streamIdx - 1; //first available stream is 1, stream 0 is avoid
+        cudaMemcpyAsync(m_graph->get_device_edgeList_ptr(dev_edgeList_idx),
                             arr_activeEdgeList,
                             numActiveEdges_curPartition * sizeof(uint32_t),
                             cudaMemcpyHostToDevice,
                             m_streams[streamIdx]);
 
-            free(arr_activeEdgeList);
-        }
-
-        for (unsigned int t = 0; t < numThreads; t++)
-            runThreads[t].join();
 
         SSSP::kernel_SSSP_compaction_sync_push_dd<<<round_up_divide(num_subgraph_nodes, 512), 512, 0, m_streams[streamIdx]>>>(num_subgraph_nodes,
                                                                                                                               m_graph->get_device_value_ptr(),
                                                                                                                               m_graph->get_device_buffer_ptr(),
                                                                                                                               m_graph->get_vector_device_worklist_ptr()[partitionIdx],
                                                                                                                               m_graph->get_managed_subGraph_edgeStartIndex_CSR_ptr() + startNodeIdx,
-                                                                                                                              m_graph->get_device_edgeList_ptr(streamIdx));
+                                                                                                                              m_graph->get_device_edgeList_ptr(dev_edgeList_idx));
+        cudaStreamSynchronize(m_streams[streamIdx]);
+        free(arr_activeEdgeList);
+        CHECK_LAST_CUDA_ERROR();
     }
 
     void UM_process_partition(uint32_t partitionIdx, uint32_t streamIdx)
     {
         uint32_t startNodeIdx = m_graph->get_partition_start_node(partitionIdx);
+        uint32_t numActiveNodeInPartition = m_graph->get_partition_numActiveNodes(partitionIdx);
         uint32_t numNodesInPartition = m_graph->get_partition_start_node(partitionIdx + 1) - m_graph->get_partition_start_node(partitionIdx);
         uint32_t numEdgesInPartition = m_graph->get_partition_start_edge(partitionIdx + 1) - m_graph->get_partition_start_edge(partitionIdx);
         uint32_t *dev_edgeList_curPartiton = m_graph->get_unifiedMem_array_edgeList_ptr()+ m_graph->get_partition_start_edge(partitionIdx);
-        SSSP::kernel_SSSP_sync_push_dd<<<round_up_divide(numNodesInPartition,512), 512, 0, m_streams[streamIdx]>>>(numNodesInPartition,
+        
+        if(m_vec_kernelConfigVariant_perPartition[partitionIdx] == kernelConfigVariant::sync_push_dd)
+        {
+            SSSP::kernel_SSSP_sync_push_dd<<<round_up_divide(numActiveNodeInPartition,512), 512, 0, m_streams[streamIdx]>>>(numActiveNodeInPartition,
                                                                                                         m_graph->get_device_value_ptr(),
                                                                                                         m_graph->get_device_buffer_ptr(),
                                                                                                         m_graph->get_vector_device_worklist_ptr()[partitionIdx],
                                                                                                         dev_edgeList_curPartiton,
                                                                                                         m_graph->get_partition_start_edge(partitionIdx),
                                                                                                         m_graph->get_device_node_edgeStartIndex_CSR_ptr());
+        }
+        else if(m_vec_kernelConfigVariant_perPartition[partitionIdx] == kernelConfigVariant::sync_push_td)
+        {
+            SSSP::kernel_SSSP_sync_push_td<<<round_up_divide(numNodesInPartition,512), 512, 0, m_streams[streamIdx]>>>(numNodesInPartition,
+                                                                                                        startNodeIdx,
+                                                                                                        m_graph->get_device_value_ptr(),
+                                                                                                        m_graph->get_device_buffer_ptr(),
+                                                                                                        dev_edgeList_curPartiton,
+                                                                                                        m_graph->get_partition_start_edge(partitionIdx),
+                                                                                                        m_graph->get_device_node_edgeStartIndex_CSR_ptr());
+        }
+        
 
-
-        // uint32_t *dev_edgeList_zeroCopy = m_graph->get_unifiedMem_array_edgeList_ptr();
-        // SSSP::kernel_SSSP_zeroCopy_sync_push_dd<<<numNodesInPartition / 512 + 1, 512, 0, m_streams[streamIdx]>>>(numNodesInPartition,
-        //                                                                                                 m_graph->get_device_value_ptr(),
-        //                                                                                                 m_graph->get_device_buffer_ptr(),
-        //                                                                                                 m_graph->get_vector_device_worklist_ptr()[partitionIdx],
-        //                                                                                                 dev_edgeList_zeroCopy,
-        //                                                                                                 m_graph->get_device_node_edgeStartIndex_CSR_ptr());
 
 
     }
@@ -781,7 +1016,7 @@ public:
     void start()
     {
         bool isConverged = false;
-        isConverged = initial_Framework();
+        isConverged = initial_Framework_reportActiveEdge();
 
         uint32_t iterationCount = 0;
         while (!isConverged)
@@ -789,6 +1024,8 @@ public:
             Stopwatch sw_iteration_time(true);
             uint32_t numPartitionToProcess = 0;
             uint32_t numActiveNodes = 0;
+            uint32_t numActiveEdges = 0;
+            uint32_t numEF = 0; uint32_t numZC = 0; uint32_t numUM = 0; uint32_t numCOMP = 0;
             uint32_t streamIdx = 0;
             for (int i = 0; i < m_graph->get_num_partitions(); i++)
             {
@@ -798,30 +1035,37 @@ public:
                 }
                 else
                 {
+                    streamIdx++; //skip stream 0
+                    if (streamIdx == FLAGS_nStreams)
+                    {
+                        streamIdx = 1;
+                    }
+
                     numPartitionToProcess++;
                     numActiveNodes += m_graph->get_partition_numActiveNodes(i);
+                    numActiveEdges += m_graph->get_numActiveEdge_counter_value(i, m_streams[streamIdx]);
                 }
-                streamIdx++;
-                if (streamIdx == FLAGS_nStreams)
-                {
-                    streamIdx = 1;
-                }
+                
                 if(m_vec_dataTransferType_perPartition[i] == dataTransferType::Explicit_Filter)
                 {
                     // printf("iteration: %d partition: %d Explicit_Filter", iterationCount, i);
                     EF_process_partition(i, streamIdx);
+                    numEF++;
                 }
                 else if(m_vec_dataTransferType_perPartition[i] == dataTransferType::Unified_Memory)
                 {
                     UM_process_partition(i, streamIdx);
+                    numUM++;
                 }
                 else if(m_vec_dataTransferType_perPartition[i] == dataTransferType::Zero_Copy)
                 {
                     ZC_process_partition(i, streamIdx);
+                    numZC++;
                 }
                 else if(m_vec_dataTransferType_perPartition[i] == dataTransferType::Explicit_Compaction)
                 {
                     COMP_process_partition(i, streamIdx);
+                    numCOMP++;
                 }
                 else
                 {
@@ -835,9 +1079,12 @@ public:
             }
             CHECK_LAST_CUDA_ERROR();
 
-            isConverged = rebuild_workList_check_converge();
+            // isConverged = rebuild_workList_check_converge();
+            isConverged = rebuild_workList_check_converge_reportActiveEdgeCount();
+
             sw_iteration_time.stop();
-            printf("iteration: %d iteration_time: %f ms, numPartitionProcessed: %u Cur_numActiveNodes: %u\n", iterationCount, sw_iteration_time.ms(), numPartitionToProcess, numActiveNodes);
+            printf("iteration: %d iteration_time: %f ms, numPartitionProcessed: %u Cur_numActiveNodes: %u Cur_numActiveEdges: %u\n", iterationCount, sw_iteration_time.ms(), numPartitionToProcess, numActiveNodes, numActiveEdges);
+            printf("numEF: %u numUM: %u numZC: %u numCOMP: %u\n", numEF, numUM, numZC, numCOMP);
             iterationCount++;
             if (iterationCount == 1000)
             {
