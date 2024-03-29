@@ -106,6 +106,7 @@ private:
     uint32_t *m_dev_arr_node_edgeStartIndex_CSR;
     TValue *m_dev_node_value_datum;
     TValue *m_dev_node_buffer_datum;
+    TValue *m_dev_node_buffer_datum_nextIteration;
 
     uint32_t m_num_partitions;
 
@@ -121,7 +122,7 @@ public:
                m_num_partitions(0),m_managed_arr_activeNodesLabeling(nullptr),m_managed_activeNodesDegree(nullptr),m_managed_arr_prefixLabeling(nullptr),
                m_managed_prefixSumDegree(nullptr),m_managed_arr_subGraph_edgeStartIndex_CSR(nullptr),
               m_dev_arr_node_edgeStartIndex_CSR(nullptr),
-              m_dev_node_buffer_datum(nullptr), m_dev_node_value_datum(nullptr)
+              m_dev_node_buffer_datum(nullptr), m_dev_node_buffer_datum_nextIteration(nullptr),m_dev_node_value_datum(nullptr)
               {};
     ~Graph(){
         if(m_host_arr_node_edgeStartIndex_CSR != nullptr)
@@ -134,6 +135,8 @@ public:
             CHECK_CUDA_ERROR(cudaFree(m_dev_node_value_datum));
         if(m_dev_node_buffer_datum != nullptr)
             CHECK_CUDA_ERROR(cudaFree(m_dev_node_buffer_datum));
+        if(m_dev_node_buffer_datum_nextIteration != nullptr)
+            CHECK_CUDA_ERROR(cudaFree(m_dev_node_buffer_datum_nextIteration));
         if(m_managed_arr_activeNodesLabeling != nullptr)
             CHECK_CUDA_ERROR(cudaFree(m_managed_arr_activeNodesLabeling));
         if(m_managed_arr_prefixLabeling != nullptr)
@@ -275,6 +278,10 @@ public:
     TValue *get_device_buffer_ptr()
     {
         return m_dev_node_buffer_datum;
+    }
+    TValue *get_device_buffer_nextIteration_ptr()
+    {
+        return m_dev_node_buffer_datum_nextIteration;
     }
 
     uint32_t *get_device_edgeList_ptr(uint32_t streamIdx)
@@ -425,7 +432,10 @@ public:
             infile.close();
         }
         else if (fileExtension == "wel")
+        {            
             m_isWeighted = true;
+            exit(1);
+        }
         else
         {
             std::cout << "File extension not supported!" << std::endl;
@@ -509,6 +519,7 @@ public:
 
             CHECK_CUDA_ERROR(cudaMalloc(&m_dev_node_value_datum, m_num_nodes * sizeof(TValue)));
             CHECK_CUDA_ERROR(cudaMalloc(&m_dev_node_buffer_datum, m_num_nodes * sizeof(TValue)));
+            CHECK_CUDA_ERROR(cudaMalloc(&m_dev_node_buffer_datum_nextIteration, m_num_nodes * sizeof(TValue)));
             // CHECK_CUDA_ERROR(cudaMalloc(&m_dev_worklist, m_num_nodes * sizeof(uint32_t)));
             // CHECK_CUDA_ERROR(cudaMalloc(&m_dev_worklist_counter, sizeof(uint32_t)));
             // CHECK_CUDA_ERROR(cudaMemset(m_dev_worklist_counter, 0, sizeof(uint32_t)));

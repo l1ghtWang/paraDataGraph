@@ -54,7 +54,6 @@ namespace SSSP
     void kernel_InitGraph(uint32_t work_size,
                           uint32_t *dev_node_value_datum,
                           uint32_t *dev_node_buffer_datum,
-                          uint32_t *dev_node_buffer_datum_nextIteration,
                           uint32_t source_node)
     {
         uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -65,29 +64,12 @@ namespace SSSP
             if (node == source_node)
             {
                 dev_node_buffer_datum[node] = 0;
-                dev_node_buffer_datum_nextIteration[node] = 0;
             }
             else
             {
                 dev_node_buffer_datum[node] = UINT32_MAX;
-                dev_node_buffer_datum_nextIteration[node] = UINT32_MAX;
             }
             dev_node_value_datum[node] = UINT32_MAX;
-        }
-    }
-
-    __global__ 
-    void kernel_update_syncMode_buffer_perPartition(uint32_t startNodeIdx,
-                                        uint32_t work_size,
-                                       uint32_t *dev_node_buffer_datum,
-                                       uint32_t *dev_node_buffer_datum_nextIteration)
-    {
-        uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-        if(tid < work_size)
-        {
-            uint32_t node = tid + startNodeIdx;
-            if(dev_node_buffer_datum_nextIteration[node] < dev_node_buffer_datum[node] ) //sssp
-                dev_node_buffer_datum[node] = dev_node_buffer_datum_nextIteration[node];
         }
     }
 
@@ -211,39 +193,9 @@ namespace SSSP
         }
     }
 
-    __global__ void kernel_SSSP_async_push_dd(uint32_t work_size,
-                                             uint32_t *dev_node_value_datum,
-                                             uint32_t *dev_node_buffer_datum,
-                                             uint32_t *dev_worklist,
-                                             uint32_t *dev_edgeList,
-                                             uint32_t partition_start_edge_offset,
-                                             uint32_t *dev_arr_node_edgeStartIndex_CSR)
-    {
-        uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-        if(tid < work_size)
-        {
-            uint32_t node = dev_worklist[tid];
-            if(dev_node_value_datum[node] > dev_node_buffer_datum[node])
-            {
-                dev_node_value_datum[node] = dev_node_buffer_datum[node];
-                // uint32_t edge_loc =
-                uint32_t edge_start = dev_arr_node_edgeStartIndex_CSR[node] - partition_start_edge_offset;
-                uint32_t edge_end = dev_arr_node_edgeStartIndex_CSR[node + 1] - partition_start_edge_offset;
-                for (uint32_t edge = edge_start; edge < edge_end; edge++)
-                {
-                    uint32_t dst_node = dev_edgeList[edge];
-                    uint32_t new_dist = dev_node_buffer_datum[node] + 1;
-                    atomicMin(&dev_node_buffer_datum[dst_node], new_dist);
-                }
-            }
-
-        }
-    }
-
     __global__ void kernel_SSSP_sync_push_dd(uint32_t work_size,
                                              uint32_t *dev_node_value_datum,
                                              uint32_t *dev_node_buffer_datum,
-                                             uint32_t *dev_node_buffer_datum_nextIteration,
                                              uint32_t *dev_worklist,
                                              uint32_t *dev_edgeList,
                                              uint32_t partition_start_edge_offset,
@@ -253,36 +205,6 @@ namespace SSSP
         if(tid < work_size)
         {
             uint32_t node = dev_worklist[tid];
-            if(dev_node_value_datum[node] > dev_node_buffer_datum[node])
-            {
-                dev_node_value_datum[node] = dev_node_buffer_datum[node];
-                // uint32_t edge_loc =
-                uint32_t edge_start = dev_arr_node_edgeStartIndex_CSR[node] - partition_start_edge_offset;
-                uint32_t edge_end = dev_arr_node_edgeStartIndex_CSR[node + 1] - partition_start_edge_offset;
-                for (uint32_t edge = edge_start; edge < edge_end; edge++)
-                {
-                    uint32_t dst_node = dev_edgeList[edge];
-                    uint32_t new_dist = dev_node_buffer_datum[node] + 1;
-                    atomicMin(&dev_node_buffer_datum_nextIteration[dst_node], new_dist);
-                    // atomicMin(&dev_node_buffer_datum[dst_node], new_dist);
-                }
-            }
-
-        }
-    }
-
-    __global__ void kernel_SSSP_async_push_td(uint32_t work_size,
-                                             uint32_t partition_start_node,
-                                             uint32_t *dev_node_value_datum,
-                                             uint32_t *dev_node_buffer_datum,
-                                             uint32_t *dev_edgeList,
-                                             uint32_t partition_start_edge_offset,
-                                             uint32_t *dev_arr_node_edgeStartIndex_CSR)
-    {
-        uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-        if(tid < work_size)
-        {
-            uint32_t node = tid + partition_start_node;
             if(dev_node_value_datum[node] > dev_node_buffer_datum[node])
             {
                 dev_node_value_datum[node] = dev_node_buffer_datum[node];
@@ -304,7 +226,6 @@ namespace SSSP
                                              uint32_t partition_start_node,
                                              uint32_t *dev_node_value_datum,
                                              uint32_t *dev_node_buffer_datum,
-                                             uint32_t *dev_node_buffer_datum_nextIteration,
                                              uint32_t *dev_edgeList,
                                              uint32_t partition_start_edge_offset,
                                              uint32_t *dev_arr_node_edgeStartIndex_CSR)
@@ -323,7 +244,7 @@ namespace SSSP
                 {
                     uint32_t dst_node = dev_edgeList[edge];
                     uint32_t new_dist = dev_node_buffer_datum[node] + 1;
-                    atomicMin(&dev_node_buffer_datum_nextIteration[dst_node], new_dist);
+                    atomicMin(&dev_node_buffer_datum[dst_node], new_dist);
                 }
             }
 
@@ -331,35 +252,6 @@ namespace SSSP
     }
 
     __global__ void kernel_SSSP_zeroCopy_sync_push_dd(uint32_t work_size,
-                                             uint32_t *dev_node_value_datum,
-                                             uint32_t *dev_node_buffer_datum,
-                                             uint32_t *dev_node_buffer_datum_nextIteration,
-                                             uint32_t *dev_worklist,
-                                             uint32_t *dev_edgeList,
-                                             uint32_t *dev_arr_node_edgeStartIndex_CSR)
-    {
-        uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-        if(tid < work_size)
-        {
-            uint32_t node = dev_worklist[tid];
-            if (dev_node_value_datum[node] > dev_node_buffer_datum[node])
-            {
-                dev_node_value_datum[node] = dev_node_buffer_datum[node];
-                // uint32_t edge_loc =
-                uint32_t edge_start = dev_arr_node_edgeStartIndex_CSR[node];
-                uint32_t edge_end = dev_arr_node_edgeStartIndex_CSR[node + 1];
-                for (uint32_t edge = edge_start; edge < edge_end; edge++)
-                {
-                    uint32_t dst_node = dev_edgeList[edge];
-                    uint32_t new_dist = dev_node_buffer_datum[node] + 1;
-                    // atomicMin(&dev_node_buffer_datum[dst_node], new_dist);
-                    atomicMin(&dev_node_buffer_datum_nextIteration[dst_node], new_dist);
-                }
-            }
-        }
-    }
-
-    __global__ void kernel_SSSP_zeroCopy_async_push_dd(uint32_t work_size,
                                              uint32_t *dev_node_value_datum,
                                              uint32_t *dev_node_buffer_datum,
                                              uint32_t *dev_worklist,
@@ -390,35 +282,6 @@ namespace SSSP
                                              uint32_t partition_start_node,
                                              uint32_t *dev_node_value_datum,
                                              uint32_t *dev_node_buffer_datum,
-                                             uint32_t *dev_node_buffer_datum_nextIteration,
-                                             uint32_t *dev_edgeList,
-                                             uint32_t *dev_arr_node_edgeStartIndex_CSR)
-    {
-        uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-        if(tid < work_size)
-        {
-            uint32_t node = tid + partition_start_node;
-            if (dev_node_value_datum[node] > dev_node_buffer_datum[node])
-            {
-                dev_node_value_datum[node] = dev_node_buffer_datum[node];
-                // uint32_t edge_loc =
-                uint32_t edge_start = dev_arr_node_edgeStartIndex_CSR[node];
-                uint32_t edge_end = dev_arr_node_edgeStartIndex_CSR[node + 1];
-                for (uint32_t edge = edge_start; edge < edge_end; edge++)
-                {
-                    uint32_t dst_node = dev_edgeList[edge];
-                    uint32_t new_dist = dev_node_buffer_datum[node] + 1;
-                    // atomicMin(&dev_node_buffer_datum[dst_node], new_dist);
-                    atomicMin(&dev_node_buffer_datum_nextIteration[dst_node], new_dist);
-                }
-            }
-        }
-    }
-
-    __global__ void kernel_SSSP_zeroCopy_async_push_td(uint32_t work_size,
-                                             uint32_t partition_start_node,
-                                             uint32_t *dev_node_value_datum,
-                                             uint32_t *dev_node_buffer_datum,
                                              uint32_t *dev_edgeList,
                                              uint32_t *dev_arr_node_edgeStartIndex_CSR)
     {
@@ -442,40 +305,11 @@ namespace SSSP
         }
     }
 
+
     __global__ void kernel_SSSP_compaction_sync_push_dd(uint32_t work_size,
                                                         uint32_t *dev_node_value_datum,
                                                         uint32_t *dev_node_buffer_datum,
-                                                        uint32_t *dev_node_buffer_datum_nextIteration,
-                                                        uint32_t *subgraph_active_nodes,
-                                                        uint32_t* subgraph_edgeStartIndex_CSR_curPartition,
-                                                        uint32_t* subgraph_edgeList)
-    {
-        uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-        if(tid < work_size)
-        {
-            // uint32_t node = dev_worklist[tid];
-            uint32_t node = subgraph_active_nodes[tid];
-            if (dev_node_value_datum[node] > dev_node_buffer_datum[node])
-            {
-                dev_node_value_datum[node] = dev_node_buffer_datum[node];
-                // uint32_t edge_start = dev_arr_node_edgeStartIndex_CSR[node];
-                // uint32_t edge_end = dev_arr_node_edgeStartIndex_CSR[node + 1];
-                uint32_t edge_start = subgraph_edgeStartIndex_CSR_curPartition[tid];
-                uint32_t edge_end = subgraph_edgeStartIndex_CSR_curPartition[tid + 1];
 
-                for (uint32_t edge = edge_start; edge < edge_end; edge++)
-                {
-                    uint32_t dst_node = subgraph_edgeList[edge];
-                    uint32_t new_dist = dev_node_buffer_datum[node] + 1;
-                    atomicMin(&dev_node_buffer_datum_nextIteration[dst_node], new_dist);
-                }
-            }
-        }
-    }
-
-    __global__ void kernel_SSSP_compaction_async_push_dd(uint32_t work_size,
-                                                        uint32_t *dev_node_value_datum,
-                                                        uint32_t *dev_node_buffer_datum,
                                                         uint32_t *subgraph_active_nodes,
                                                         uint32_t* subgraph_edgeStartIndex_CSR_curPartition,
                                                         uint32_t* subgraph_edgeList)
@@ -652,7 +486,6 @@ public:
         SSSP::kernel_InitGraph<<<round_up_divide(m_graph->get_num_nodes(),512), 512>>>(m_graph->get_num_nodes(),
                                                                      m_graph->get_device_value_ptr(),
                                                                      m_graph->get_device_buffer_ptr(),
-                                                                     m_graph->get_device_buffer_nextIteration_ptr(),
                                                                      FLAGS_source_node);
         cudaDeviceSynchronize();
         CHECK_LAST_CUDA_ERROR();
@@ -732,7 +565,6 @@ public:
         SSSP::kernel_InitGraph<<<round_up_divide(m_graph->get_num_nodes(),512), 512>>>(m_graph->get_num_nodes(),
                                                                      m_graph->get_device_value_ptr(),
                                                                      m_graph->get_device_buffer_ptr(),
-                                                                     m_graph->get_device_buffer_nextIteration_ptr(),
                                                                      FLAGS_source_node);
         cudaDeviceSynchronize();
         CHECK_LAST_CUDA_ERROR();
@@ -939,17 +771,6 @@ public:
         return isConverged;
     }
 
-    void update_syncMode_buffer_partition(uint32_t partitionIdx, uint32_t streamIdx)
-    {
-        uint32_t startNodeIdx = m_graph->get_partition_start_node(partitionIdx);
-        uint32_t numNodesInPartition = m_graph->get_partition_start_node(partitionIdx + 1) - m_graph->get_partition_start_node(partitionIdx);
-        SSSP::kernel_update_syncMode_buffer_perPartition<<<round_up_divide(numNodesInPartition,512), 512, 0, m_streams[streamIdx]>>>(
-                                                                                                        startNodeIdx,
-                                                                                                        numNodesInPartition,
-                                                                                                        m_graph->get_device_buffer_ptr(),
-                                                                                                        m_graph->get_device_buffer_nextIteration_ptr());
-    }
-
     void EF_process_partition(uint32_t partitionIdx, uint32_t streamIdx)
     {
         uint32_t startNodeIdx = m_graph->get_partition_start_node(partitionIdx);
@@ -969,7 +790,6 @@ public:
             SSSP::kernel_SSSP_sync_push_dd<<<round_up_divide(numActiveNodeInPartition,512), 512, 0, m_streams[streamIdx]>>>(numActiveNodeInPartition,
                                                                                                         m_graph->get_device_value_ptr(),
                                                                                                         m_graph->get_device_buffer_ptr(),
-                                                                                                        m_graph->get_device_buffer_nextIteration_ptr(),
                                                                                                         m_graph->get_vector_device_worklist_ptr()[partitionIdx],
                                                                                                         dev_edgeList_curPartiton,
                                                                                                         m_graph->get_partition_start_edge(partitionIdx),
@@ -981,7 +801,6 @@ public:
                                                                                                         startNodeIdx,
                                                                                                         m_graph->get_device_value_ptr(),
                                                                                                         m_graph->get_device_buffer_ptr(),
-                                                                                                        m_graph->get_device_buffer_nextIteration_ptr(),
                                                                                                         dev_edgeList_curPartiton,
                                                                                                         m_graph->get_partition_start_edge(partitionIdx),
                                                                                                         m_graph->get_device_node_edgeStartIndex_CSR_ptr());
@@ -1001,7 +820,6 @@ public:
             SSSP::kernel_SSSP_zeroCopy_sync_push_dd<<<round_up_divide(numActiveNodeInPartition,512), 512, 0, m_streams[streamIdx]>>>(numActiveNodeInPartition,
                                                                                                         m_graph->get_device_value_ptr(),
                                                                                                         m_graph->get_device_buffer_ptr(),
-                                                                                                        m_graph->get_device_buffer_nextIteration_ptr(),
                                                                                                         m_graph->get_vector_device_worklist_ptr()[partitionIdx],
                                                                                                         dev_edgeList_zeroCopy,
                                                                                                         m_graph->get_device_node_edgeStartIndex_CSR_ptr());
@@ -1012,7 +830,6 @@ public:
                                                                                                         startNodeIdx,
                                                                                                         m_graph->get_device_value_ptr(),
                                                                                                         m_graph->get_device_buffer_ptr(),
-                                                                                                        m_graph->get_device_buffer_nextIteration_ptr(),
                                                                                                         dev_edgeList_zeroCopy,
                                                                                                         m_graph->get_device_node_edgeStartIndex_CSR_ptr());
         }
@@ -1154,7 +971,6 @@ public:
         SSSP::kernel_SSSP_compaction_sync_push_dd<<<round_up_divide(num_subgraph_nodes, 512), 512, 0, m_streams[streamIdx]>>>(num_subgraph_nodes,
                                                                                                                               m_graph->get_device_value_ptr(),
                                                                                                                               m_graph->get_device_buffer_ptr(),
-                                                                                                                              m_graph->get_device_buffer_nextIteration_ptr(),
                                                                                                                               m_graph->get_vector_device_worklist_ptr()[partitionIdx],
                                                                                                                               m_graph->get_managed_subGraph_edgeStartIndex_CSR_ptr() + startNodeIdx,
                                                                                                                               m_graph->get_device_edgeList_ptr(dev_edgeList_idx));
@@ -1176,7 +992,6 @@ public:
             SSSP::kernel_SSSP_sync_push_dd<<<round_up_divide(numActiveNodeInPartition,512), 512, 0, m_streams[streamIdx]>>>(numActiveNodeInPartition,
                                                                                                         m_graph->get_device_value_ptr(),
                                                                                                         m_graph->get_device_buffer_ptr(),
-                                                                                                        m_graph->get_device_buffer_nextIteration_ptr(),
                                                                                                         m_graph->get_vector_device_worklist_ptr()[partitionIdx],
                                                                                                         dev_edgeList_curPartiton,
                                                                                                         m_graph->get_partition_start_edge(partitionIdx),
@@ -1188,7 +1003,6 @@ public:
                                                                                                         startNodeIdx,
                                                                                                         m_graph->get_device_value_ptr(),
                                                                                                         m_graph->get_device_buffer_ptr(),
-                                                                                                        m_graph->get_device_buffer_nextIteration_ptr(),
                                                                                                         dev_edgeList_curPartiton,
                                                                                                         m_graph->get_partition_start_edge(partitionIdx),
                                                                                                         m_graph->get_device_node_edgeStartIndex_CSR_ptr());
@@ -1257,29 +1071,6 @@ public:
                 {
                     printf("Error: data transfer type not supported\n");
                 }
-            }
-
-            for (int i = 0; i < FLAGS_nStreams; i++)
-            {
-                cudaStreamSynchronize(m_streams[i]);
-            }
-            CHECK_LAST_CUDA_ERROR();
-
-            //for sync mode, write updates from buffer_nextIteration to buffer
-            streamIdx = 0;
-            for (int partitionIdx = 0; partitionIdx < m_graph->get_num_partitions(); partitionIdx++)
-            {
-
-                streamIdx++; //skip stream 0
-                if (streamIdx == FLAGS_nStreams)
-                {
-                    streamIdx = 1;
-                }
-                
-                if(m_vec_kernelConfigVariant_perPartition[partitionIdx] == kernelConfigVariant::sync_push_dd|| 
-                   m_vec_kernelConfigVariant_perPartition[partitionIdx] == kernelConfigVariant::sync_push_td)
-                    update_syncMode_buffer_partition(partitionIdx, streamIdx);
-                
             }
 
             for (int i = 0; i < FLAGS_nStreams; i++)
